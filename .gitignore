@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+
+# Local SDK/server credentials and machine-specific paths.
+teamtalk.env
+
+# Local development environments.
+.venv/
+venv/
+env/
+
