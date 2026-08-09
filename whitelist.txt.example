@@ -1,0 +1,3 @@
+# Exact TeamTalk hostnames or IP addresses allowed by tt_suite.py.
+# Add one server per line.  Comments beginning with # are ignored.
+# test.example.org

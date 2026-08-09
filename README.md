@@ -47,16 +47,19 @@ All of these are ordinary Python 3 programs and call TeamTalk directly:
 | `tt_spammer.py` | Run repeated TeamTalk login/logout cycles. |
 | `tt_leave_join_spammer.py` | Run a configurable channel leave/join test. |
 | `ttbot_the_offender.py` | Run the safe trigger-based response bot described above. |
+| `tt_suite.py` | Discover channels/users and run consent-aware combined tests. |
 
 Hyphenated filename-compatible launchers are also provided as
 `tt-message-spammer.py`, `tt-leave-join-spammer.py`, and
-`ttbot-the-offender.py`.
+`ttbot-the-offender.py`. The combined runner is also available as
+`tt-suite.sh`.
 
 Running a tool with no arguments opens prompts, just like the original tools:
 
 ```bash
 ./tt-message-spammer.sh
 ./tt-leave-join-spammer.sh
+./tt-suite.sh
 ./ttbot-the-offender.py
 ```
 
@@ -77,7 +80,18 @@ python3 tt_message_spammer.py --message 'Test' --count 3 --interval 0
 python3 tt_spammer.py --cycles 5 --interval 0
 python3 tt_leave_join_spammer.py --cycles 1 --interval 0
 python3 ttbot_the_offender.py --allow-all
+./tt-suite.sh --all-channels --all-users --join-leave-cycles 1 \
+  --channel-message 'channel test' --private-message 'private test' \
+  --message-count 1 --confirm
 ```
+
+The combined runner reads an exact, one-host-per-line allowlist from
+`whitelist.txt` before it connects. Copy `whitelist.txt.example` to
+`whitelist.txt` and add only servers that are approved for testing. Use
+`--all-channels` (or `--channel-path all`) to select every discovered channel,
+and `--all-users` (or `--user-id all`) to select every discovered online user.
+Bulk channel and private-message actions require `--confirm`; `--dry-run`
+discovers and prints targets without joining or sending.
 
 Message sends and leave/join tests accept a zero delay; there is no enforced
 one-second delay between messages. The message tool accepts any positive send

@@ -5,9 +5,9 @@ __pycache__/
 
 # Local SDK/server credentials and machine-specific paths.
 teamtalk.env
+whitelist.txt
 
 # Local development environments.
 .venv/
 venv/
 env/
-
