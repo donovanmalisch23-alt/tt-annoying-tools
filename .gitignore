@@ -11,3 +11,7 @@ whitelist.txt
 .venv/
 venv/
 env/
+
+# PyInstaller build output (download artifacts from CI instead).
+build/
+dist/
