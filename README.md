@@ -47,7 +47,7 @@ All of these are ordinary Python 3 programs and call TeamTalk directly:
 | `tt_spammer.py` | Run repeated TeamTalk login/logout cycles. |
 | `tt_leave_join_spammer.py` | Run a configurable channel leave/join test. |
 | `ttbot_the_offender.py` | Run the safe trigger-based response bot described above. |
-| `tt_suite.py` | Discover channels/users and run consent-aware combined tests. |
+| `tt_suite.py` | Discover channels/users and run consent-aware combined tests, including an optional concurrent multi-bot mode. |
 
 Hyphenated filename-compatible launchers are also provided as
 `tt-message-spammer.py`, `tt-leave-join-spammer.py`, and
@@ -84,6 +84,33 @@ python3 ttbot_the_offender.py --allow-all
   --channel-message 'channel test' --private-message 'private test' \
   --message-count 1 --confirm
 ```
+
+The suite's `--concurrent` mode splits the per-user, per-channel, and login/out
+work across concurrent bots, each on its own SDK connection: one user-bot
+private-messages every discovered user, one channel-bot messages every
+discovered channel, and any number of churn-bots each repeat login/logout
+cycles. It reuses the same `whitelist.txt` gate and requires `--confirm` (or
+`--dry-run` to preview the bot plan):
+
+```bash
+# Preview the discovered targets and the bot plan without sending:
+python3 tt_suite.py --dry-run --concurrent \
+  --private-message 'private test' --channel-message 'channel test'
+
+# Run: one user-bot (DMs every discovered user), one channel-bot (messages every
+# discovered channel), and three churn-bots (each repeats 10 login/logout cycles):
+python3 tt_suite.py --concurrent \
+  --private-message 'private test' --channel-message 'channel test' \
+  --message-count 2 --churn-bots 3 --churn-cycles 10 --interval 0.1 --confirm
+```
+
+There is no built-in ceiling on how many bots, messages, or cycles you request
+— `--churn-bots`, `--message-count`, and `--churn-cycles` accept any positive
+integer, so the practical limit is your server's own max-user setting and what
+your test machine can sustain. The discovery connection and every bot still go
+through `whitelist.txt` + `--confirm` + `--dry-run`, and every run terminates
+because the counts you pass are finite. Without `--concurrent` the suite keeps
+its original sequential single-session behavior.
 
 The combined runner reads an exact, one-host-per-line allowlist from
 `whitelist.txt` before it connects. Copy `whitelist.txt.example` to

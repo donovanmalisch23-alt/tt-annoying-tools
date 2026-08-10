@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -187,6 +188,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="join/leave cycles per selected channel; zero skips channel cycling",
     )
     parser.add_argument(
+        "--concurrent",
+        action="store_true",
+        help="run the selected actions as concurrent bots (one per concern) "
+        "instead of sequentially in a single session",
+    )
+    parser.add_argument(
+        "--churn-bots",
+        type=int,
+        default=0,
+        help="number of extra login/logout churn bots to spawn concurrently; "
+        "any non-negative integer (requires --concurrent)",
+    )
+    parser.add_argument(
+        "--churn-cycles",
+        type=int,
+        default=5,
+        help="login/logout cycles per churn bot; any positive integer",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=DEFAULT_INTERVAL,
@@ -245,6 +265,32 @@ def validate_args(args: argparse.Namespace) -> tuple[list[int], bool, bool]:
         raise TeamTalkConfigurationError(
             "channel operations require --channel-id, --channel-path, or --all-channels"
         )
+
+    if args.churn_bots < 0:
+        raise TeamTalkConfigurationError("--churn-bots cannot be negative")
+    if args.churn_cycles < 1:
+        raise TeamTalkConfigurationError("--churn-cycles must be at least 1")
+    if args.churn_bots > 0 and not args.concurrent:
+        raise TeamTalkConfigurationError(
+            "--churn-bots requires --concurrent (each churn bot opens its own "
+            "SDK connection)"
+        )
+    if args.concurrent:
+        has_action = (
+            args.private_message is not None
+            or channel_action
+            or args.churn_bots > 0
+        )
+        if not has_action:
+            raise TeamTalkConfigurationError(
+                "--concurrent requires --private-message, a channel action "
+                "(--channel-message or --join-leave-cycles), or --churn-bots"
+            )
+        if not args.dry_run and not args.confirm:
+            raise TeamTalkConfigurationError(
+                "--confirm is required for the concurrent bot run "
+                "(use --dry-run to preview the bot plan)"
+            )
 
     active_action = channel_action or args.private_message is not None
     if active_action and not args.dry_run and not args.confirm:
@@ -374,9 +420,269 @@ def run_private_operations(
                 pause(interval)
 
 
+def _bot_pause(interval: float, stop_event: threading.Event) -> bool:
+    """Sleep ``interval`` unless ``stop_event`` is set; return True if stopping."""
+
+    if interval <= 0:
+        return stop_event.is_set()
+    return stop_event.wait(interval)
+
+
+def _bot_config(base: Any, nickname: str) -> Any:
+    """Return a connection config for a worker bot: unique nick, no auto-join."""
+
+    return replace(
+        base,
+        nickname=nickname,
+        channel_id=None,
+        channel_path=None,
+        channel_password="",
+    )
+
+
+def _user_bot(
+    base_config: Any,
+    user_ids: Sequence[int],
+    message: str,
+    count: int,
+    interval: float,
+    stop_event: threading.Event,
+) -> None:
+    config = _bot_config(base_config, f"{base_config.nickname}-users")
+    with TeamTalkSession(config) as session:
+        for message_index in range(count):
+            if stop_event.is_set():
+                return
+            for recipient_index, user_id in enumerate(user_ids, start=1):
+                session.send_private_message(message, int(user_id))
+                print(
+                    f"[user-bot] private message {message_index + 1}/{count} "
+                    f"to user {user_id} ({recipient_index}/{len(user_ids)} users)."
+                )
+                if recipient_index < len(user_ids) or message_index + 1 < count:
+                    if _bot_pause(interval, stop_event):
+                        return
+
+
+def _channel_bot(
+    base_config: Any,
+    channels: Sequence[dict[str, Any]],
+    channel_password: str,
+    channel_message: Optional[str],
+    count: int,
+    join_leave_cycles: int,
+    interval: float,
+    stop_event: threading.Event,
+) -> None:
+    config = _bot_config(base_config, f"{base_config.nickname}-channels")
+    cycles = join_leave_cycles or (1 if channel_message is not None else 0)
+    if cycles == 0:
+        return
+    with TeamTalkSession(config) as session:
+        for channel in channels:
+            if stop_event.is_set():
+                return
+            channel_id = int(channel["id"])
+            channel_name = str(
+                channel.get("path") or channel.get("name") or channel_id
+            )
+            password_required = bool(channel.get("password_required"))
+            if password_required and not channel_password:
+                print(
+                    f"[channel-bot] {channel_name} requires a password; "
+                    "attempting configured credentials."
+                )
+            for cycle in range(cycles):
+                if stop_event.is_set():
+                    return
+                try:
+                    session.join_channel(channel_id, channel_password)
+                except TeamTalkError as exc:
+                    print(f"[channel-bot] could not join {channel_name}: {exc}")
+                    break
+                print(
+                    f"[channel-bot] {channel_name}: joined cycle "
+                    f"{cycle + 1}/{cycles}."
+                )
+                if channel_message is not None:
+                    for message_index in range(count):
+                        if stop_event.is_set():
+                            return
+                        session.send_channel_message(channel_message, channel_id)
+                        print(
+                            f"[channel-bot] {channel_name}: sent message "
+                            f"{message_index + 1}/{count}."
+                        )
+                        if message_index + 1 < count and _bot_pause(
+                            interval, stop_event
+                        ):
+                            return
+                session.leave_channel()
+                print(
+                    f"[channel-bot] {channel_name}: left cycle "
+                    f"{cycle + 1}/{cycles}."
+                )
+                if cycle + 1 < cycles and _bot_pause(interval, stop_event):
+                    return
+
+
+def _churn_bot(
+    base_config: Any,
+    index: int,
+    total: int,
+    cycles: int,
+    interval: float,
+    stop_event: threading.Event,
+) -> None:
+    config = _bot_config(base_config, f"{base_config.nickname}-churn-{index}")
+    tag = f"[churn-bot {index}/{total}]"
+    # open() logs in, so the first cycle starts already authenticated.
+    with TeamTalkSession(config) as session:
+        for i in range(cycles):
+            if stop_event.is_set():
+                return
+            if i:
+                session.login()
+            print(f"{tag} cycle {i + 1}/{cycles}: logged in.")
+            session.logout()
+            print(f"{tag} cycle {i + 1}/{cycles}: logged out.")
+            if i + 1 < cycles and _bot_pause(interval, stop_event):
+                return
+
+
+def _run_concurrent(
+    config: Any,
+    args: argparse.Namespace,
+    user_ids: Sequence[int],
+    all_users: bool,
+    all_channels: bool,
+) -> int:
+    # Discovery happens on a throwaway session; every worker bot then opens its
+    # own connection so the per-user, per-channel, and churn work run in parallel.
+    discovery_config = replace(config, channel_id=None, channel_path=None)
+    with TeamTalkSession(discovery_config) as session:
+        channels = session.list_channels()
+        users = session.list_users()
+    print_discovery(channels, users)
+
+    selected_users = (
+        [int(user["id"]) for user in users] if all_users else list(user_ids)
+    )
+    channel_action = bool(
+        args.channel_message is not None or args.join_leave_cycles > 0
+    )
+    selected_channels = (
+        resolve_channels(channels, config, all_channels) if channel_action else []
+    )
+
+    if all_users:
+        print(f"Selected all {len(selected_users)} discovered user(s).")
+    elif selected_users:
+        print(f"Selected {len(selected_users)} explicit user(s).")
+    if all_channels:
+        print(f"Selected all {len(selected_channels)} discovered channel(s).")
+    elif selected_channels:
+        print(f"Selected {len(selected_channels)} channel(s).")
+
+    if args.private_message is not None and not selected_users:
+        raise TeamTalkConfigurationError(
+            "no online users matched the private-message selection"
+        )
+
+    plan_lines = ["Concurrent bot plan:"]
+    if args.private_message is not None:
+        plan_lines.append(
+            f"  1 user-bot: {args.message_count} private message(s) to "
+            f"{len(selected_users)} user(s)."
+        )
+    if channel_action:
+        plan_lines.append(f"  1 channel-bot: {len(selected_channels)} channel(s).")
+    if args.churn_bots > 0:
+        plan_lines.append(
+            f"  {args.churn_bots} churn-bot(s): {args.churn_cycles} "
+            "login/logout cycle(s) each."
+        )
+    print("\n".join(plan_lines))
+
+    if args.dry_run:
+        print("Dry run complete; no bots were spawned, nothing was sent.")
+        return 0
+
+    stop_event = threading.Event()
+    threads: list[threading.Thread] = []
+    if args.private_message is not None:
+        threads.append(
+            threading.Thread(
+                target=_user_bot,
+                args=(
+                    config,
+                    selected_users,
+                    args.private_message,
+                    args.message_count,
+                    args.interval,
+                    stop_event,
+                ),
+                name="user-bot",
+                daemon=True,
+            )
+        )
+    if channel_action:
+        threads.append(
+            threading.Thread(
+                target=_channel_bot,
+                args=(
+                    config,
+                    selected_channels,
+                    config.channel_password,
+                    args.channel_message,
+                    args.message_count,
+                    args.join_leave_cycles,
+                    args.interval,
+                    stop_event,
+                ),
+                name="channel-bot",
+                daemon=True,
+            )
+        )
+    for i in range(args.churn_bots):
+        threads.append(
+            threading.Thread(
+                target=_churn_bot,
+                args=(
+                    config,
+                    i + 1,
+                    args.churn_bots,
+                    args.churn_cycles,
+                    args.interval,
+                    stop_event,
+                ),
+                name=f"churn-bot-{i + 1}",
+                daemon=True,
+            )
+        )
+
+    for thread in threads:
+        thread.start()
+    try:
+        for thread in threads:
+            thread.join()
+    except KeyboardInterrupt:
+        print("\nInterrupted: signalling bots to stop...")
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=5.0)
+        print("Stopped.")
+        return 130
+    print("Finished concurrent TeamTalk suite.")
+    return 0
+
+
 def execute(config: Any, args: argparse.Namespace) -> int:
     user_ids, all_users, all_channels = validate_args(args)
     ensure_server_allowed(config.host, args.whitelist)
+
+    if args.concurrent:
+        return _run_concurrent(config, args, user_ids, all_users, all_channels)
 
     # Discover without automatically joining the configured channel.  Channel
     # targets are joined explicitly after the complete inventory is known.
@@ -495,6 +801,20 @@ def interactive_run() -> int:
         DEFAULT_INTERVAL,
         minimum=0.0,
     )
+    concurrent = prompt_yes_no(
+        "Run as concurrent bots (one bot per concern, plus churn bots)?",
+        False,
+    )
+    churn_bots = 0
+    churn_cycles = 5
+    if concurrent:
+        churn_bots = prompt_int(
+            "Number of login/logout churn bots", 0, minimum=0
+        )
+        if churn_bots:
+            churn_cycles = prompt_int(
+                "Login/logout cycles per churn bot", 5, minimum=1
+            )
     confirm = prompt_yes_no("Proceed with the requested test operations?", False)
     args = argparse.Namespace(
         whitelist=Path(os.environ.get("TT_WHITELIST", DEFAULT_WHITELIST)),
@@ -507,6 +827,9 @@ def interactive_run() -> int:
         message_count=message_count,
         login_cycles=login_cycles,
         join_leave_cycles=join_leave_cycles,
+        concurrent=concurrent,
+        churn_bots=churn_bots,
+        churn_cycles=churn_cycles,
         interval=interval,
         dry_run=False,
         confirm=confirm,
