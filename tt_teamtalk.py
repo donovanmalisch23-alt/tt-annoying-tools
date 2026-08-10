@@ -175,25 +175,23 @@ def _find_sdk_library(sdk_python: Optional[Path]) -> Optional[Path]:
         if path.is_file():
             return path.resolve()
 
-    candidates: list[Path] = []
+    # The native library has platform-specific names: libTeamTalk5.so on
+    # Linux, libTeamTalk5.dylib on macOS, and TeamTalk5.dll on Windows (the
+    # Windows wrapper loads it as ``cdll.TeamTalk5``, without the "lib" prefix).
+    stems = ("libTeamTalk5", "libTeamTalk5Pro", "TeamTalk5", "TeamTalk5Pro")
+    exts = (".so", ".dll", ".dylib")
+
+    dirs: list[Path] = []
     for root in _sdk_roots():
-        candidates.extend(
-            (
-                root / "Library" / "TeamTalk_DLL" / "libTeamTalk5.so",
-                root / "Library" / "TeamTalk_DLL" / "libTeamTalk5Pro.so",
-                root / "libTeamTalk5.so",
-                root / "libTeamTalk5Pro.so",
-            )
-        )
+        dirs.extend((root / "Library" / "TeamTalk_DLL", root))
     if sdk_python is not None:
-        candidates.extend(
-            (
-                sdk_python.parent / "libTeamTalk5.so",
-                sdk_python.parent / "libTeamTalk5Pro.so",
-                sdk_python.parent.parent / "TeamTalk_DLL" / "libTeamTalk5.so",
-                sdk_python.parent.parent / "TeamTalk_DLL" / "libTeamTalk5Pro.so",
-            )
-        )
+        dirs.extend((sdk_python.parent, sdk_python.parent.parent / "TeamTalk_DLL"))
+
+    candidates: list[Path] = []
+    for directory in dirs:
+        for stem in stems:
+            for ext in exts:
+                candidates.append(directory / f"{stem}{ext}")
 
     for candidate in candidates:
         if candidate.is_file():
@@ -213,12 +211,27 @@ def _import_sdk_from_file(path: Path, library: Optional[Path]) -> Any:
     previous_module = sys.modules.get(module_name)
     sys.modules[module_name] = module
 
+    # On Windows the upstream wrapper loads the native library as
+    # ``cdll.TeamTalk5`` (attribute access, which bypasses LoadLibrary) and
+    # relies on ``os.add_dll_directory`` to locate ``TeamTalk5.dll``.  In a
+    # frozen build that directory is derived from this module's path with a
+    # literal "..\\TeamTalk_DLL" suffix; register the resolved, absolute DLL
+    # directory here too so the load never depends on that ".." resolving.
+    if sys.platform == "win32" and library is not None:
+        dll_dir = str(Path(library).resolve().parent)
+        try:
+            if hasattr(os, "add_dll_directory") and os.path.isdir(dll_dir):
+                os.add_dll_directory(dll_dir)
+        except OSError:
+            pass
+
     original_load_library = ctypes.cdll.LoadLibrary
 
     def load_library(name: Any) -> Any:
         name_text = os.fspath(name) if isinstance(name, os.PathLike) else str(name)
-        if library is not None and os.path.basename(name_text).startswith(
-            "libTeamTalk5"
+        base = os.path.basename(name_text)
+        if library is not None and (
+            base.startswith("libTeamTalk5") or base.startswith("TeamTalk5")
         ):
             return original_load_library(str(library))
         return original_load_library(name)

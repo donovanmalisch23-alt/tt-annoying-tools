@@ -3,8 +3,15 @@
 
 Each tool is frozen into a one-file executable that bundles the official
 ``TeamTalk5.py`` Python interface and the native library (``libTeamTalk5.so``
-on Linux, ``libTeamTalk5.dll`` on Windows) so the result runs without a
-separately installed SDK.
+on Linux, ``libTeamTalk5.dylib`` on macOS, ``TeamTalk5.dll`` on Windows) so the
+result runs without a separately installed SDK.
+
+The SDK files are bundled into ``TeamTalkPy/`` and ``TeamTalk_DLL/`` subdirs of
+the frozen archive, matching the layout the upstream ``TeamTalk5.py`` wrapper
+expects: it adds ``../TeamTalk_DLL`` as a DLL directory and loads the native
+library from there, and imports the Python interface from ``TeamTalkPy/``.
+Keeping this layout means the wrapper's own discovery code finds the bundled
+files at runtime with no monkeypatching required.
 
 Requirements:
   * PyInstaller installed in the current interpreter (``pip install pyinstaller``).
@@ -48,8 +55,9 @@ def find_sdk_files() -> tuple[Path, Path]:
         )
     if sdk_library is None or not Path(sdk_library).is_file():
         raise SystemExit(
-            "The TeamTalk native library (libTeamTalk5.so / .dll) was not found. "
-            "Set TEAMTALK_SDK_PATH (or TEAMTALK_SDK_LIBRARY) to the extracted SDK."
+            "The TeamTalk native library (libTeamTalk5.so / .dylib, or "
+            "TeamTalk5.dll on Windows) was not found. Set TEAMTALK_SDK_PATH "
+            "(or TEAMTALK_SDK_LIBRARY) to the extracted SDK."
         )
     return Path(sdk_python), Path(sdk_library)
 
@@ -72,6 +80,11 @@ def main() -> int:
     here = Path(__file__).resolve().parent
     dist_dir = here / "dist"
     build_dir = here / "build"
+    # Bundle into TeamTalkPy/ and TeamTalk_DLL/ subdirs so the upstream
+    # TeamTalk5.py wrapper finds them at runtime: on Windows it calls
+    # os.add_dll_directory(<wrapperdir>/../TeamTalk_DLL) and loads
+    # TeamTalk5.dll from there, and on Linux/macOS the tools' own loader
+    # resolves the native lib from <TeamTalkPy>/../TeamTalk_DLL/.
     common = [
         sys.executable,
         "-m",
@@ -86,9 +99,9 @@ def main() -> int:
         "--specpath",
         str(build_dir),
         "--add-data",
-        f"{sdk_python}{sep}.",
+        f"{sdk_python}{sep}TeamTalkPy",
         "--add-data",
-        f"{sdk_library}{sep}.",
+        f"{sdk_library}{sep}TeamTalk_DLL",
     ]
 
     for name, script in TOOLS.items():
