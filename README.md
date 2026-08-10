@@ -112,6 +112,22 @@ through `whitelist.txt` + `--confirm` + `--dry-run`, and every run terminates
 because the counts you pass are finite. Without `--concurrent` the suite keeps
 its original sequential single-session behavior.
 
+### Kick resistance (all tools)
+
+Every tool reconnects and resumes after a kick or disconnect. When a bot loses
+its connection, it waits `--reconnect-delay` seconds (default `3.5`, matching
+the "3.5 s" check interval), checks whether it is still online, and if not it
+rebuilds its SDK connection, logs back in, rejoins its working channel, and
+resumes the loop from where it was. Idle bots (the response bot) run the same
+online check on a watchdog while they wait for events, so they notice a server
+kick within the delay. Turn it off with `--no-kick-resistance` (or
+`TT_KICK_RESISTANCE=0`) to make a tool stop when disconnected instead.
+
+```bash
+# churn bot that reconnects after every kick, 2 s between checks:
+python3 tt_spammer.py --cycles 1000 --interval 0.1 --reconnect-delay 2 --confirm
+```
+
 The combined runner reads an exact, one-host-per-line allowlist from
 `whitelist.txt` before it connects. Copy `whitelist.txt.example` to
 `whitelist.txt` and add only servers that are approved for testing. Use

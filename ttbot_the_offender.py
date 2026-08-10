@@ -134,9 +134,13 @@ def run(args: argparse.Namespace, config=None) -> int:
         if text_event is None:
             raise TeamTalkError("the loaded SDK does not expose text-message events")
         channel_id = session.current_channel_id()
+        session.rejoin_channel_id = channel_id
+        session.rejoin_channel_password = config.channel_password
         own_user_id = sdk_int(session.client.getMyUserID(), -1)
         last_reply: dict[int, float] = {}
         response_count = 0
+        last_check = 0.0
+        reconnect_delay = config.reconnect_delay
         print(
             f"Listening in channel {channel_id}; trigger {args.trigger!r}. "
             "Press Ctrl+C to stop."
@@ -144,6 +148,29 @@ def run(args: argparse.Namespace, config=None) -> int:
 
         while args.max_responses == 0 or response_count < args.max_responses:
             message = session.poll(1000)
+            watch_now = time.monotonic()
+            if watch_now - last_check >= reconnect_delay:
+                last_check = watch_now
+                if not session.is_online():
+                    print("[kick-resistance] bot was kicked from the server.")
+                    if not session.check_and_reconnect():
+                        print("Could not reconnect; stopping bot.")
+                        return 1
+                    try:
+                        channel_id = session.current_channel_id()
+                        own_user_id = sdk_int(session.client.getMyUserID(), -1)
+                    except TeamTalkError:
+                        pass
+                    continue
+                # Still online: rejoin if kicked out of the channel only.
+                try:
+                    session.current_channel_id()
+                except TeamTalkConfigurationError:
+                    print("[kick-resistance] kicked from channel; rejoining.")
+                    try:
+                        session.join_channel(channel_id, config.channel_password)
+                    except TeamTalkError as exc:
+                        print(f"[kick-resistance] rejoin failed: {exc}")
             if sdk_int(getattr(message, "nClientEvent", 0)) != text_event:
                 continue
             incoming = message_fields(getattr(message, "textmessage", None))
@@ -158,7 +185,19 @@ def run(args: argparse.Namespace, config=None) -> int:
             if now - last_reply.get(sender_id, 0.0) < args.cooldown:
                 continue
             response = render_response(args.response, incoming)
-            session.send_channel_message(response, channel_id)
+            try:
+                session.send_channel_message(response, channel_id)
+            except (TeamTalkError, OSError) as exc:
+                print(f"[kick-resistance] reply interrupted: {exc}")
+                if not session.check_and_reconnect():
+                    print("Could not reconnect; stopping bot.")
+                    return 1
+                try:
+                    channel_id = session.current_channel_id()
+                    own_user_id = sdk_int(session.client.getMyUserID(), -1)
+                except TeamTalkError:
+                    pass
+                continue
             last_reply[sender_id] = now
             response_count += 1
             print(f"Replied to user {sender_id} ({response_count}/{args.max_responses or '∞'}).")

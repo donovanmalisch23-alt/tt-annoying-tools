@@ -283,6 +283,8 @@ class ConnectionConfig:
     channel_path: Optional[str] = None
     channel_password: str = ""
     command_timeout: float = 15.0
+    kick_resistance: bool = True
+    reconnect_delay: float = 3.5
     sdk_path: Optional[str] = None
     sdk_python: Optional[str] = None
     sdk_library: Optional[str] = None
@@ -504,6 +506,27 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="seconds to wait for an SDK event (default: 15)",
     )
     parser.add_argument(
+        "--kick-resistance",
+        dest="kick_resistance",
+        action="store_true",
+        default=_env_bool("TT_KICK_RESISTANCE", True),
+        help="after a kick/disconnect, wait and reconnect to resume "
+        "(default: on; set TT_KICK_RESISTANCE=0 to disable)",
+    )
+    parser.add_argument(
+        "--no-kick-resistance",
+        dest="kick_resistance",
+        action="store_false",
+        help="do not reconnect after a kick; stop the bot instead",
+    )
+    parser.add_argument(
+        "--reconnect-delay",
+        type=float,
+        default=float(os.environ.get("TT_RECONNECT_DELAY", "3.5")),
+        help="seconds to wait before checking online status and reconnecting "
+        "after a kick (default: 3.5)",
+    )
+    parser.add_argument(
         "--sdk-path",
         default=os.environ.get("TEAMTALK_SDK_PATH"),
         help="extracted TeamTalk SDK root (or set TEAMTALK_SDK_PATH)",
@@ -532,6 +555,8 @@ def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
         raise TeamTalkConfigurationError("TCP and UDP ports must be between 1 and 65535")
     if args.timeout <= 0:
         raise TeamTalkConfigurationError("--timeout must be greater than zero")
+    if args.reconnect_delay < 0:
+        raise TeamTalkConfigurationError("--reconnect-delay cannot be negative")
     if args.channel_id is not None and args.channel_id < 0:
         raise TeamTalkConfigurationError("--channel-id cannot be negative")
 
@@ -554,6 +579,8 @@ def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
         channel_path=channel_path,
         channel_password=args.channel_password,
         command_timeout=args.timeout,
+        kick_resistance=args.kick_resistance,
+        reconnect_delay=args.reconnect_delay,
         sdk_path=args.sdk_path,
         sdk_python=args.sdk_python,
         sdk_library=args.sdk_library,
@@ -573,6 +600,8 @@ class TeamTalkSession:
         self.connected = False
         self.logged_in = False
         self.channel_id: Optional[int] = None
+        self.rejoin_channel_id: Optional[int] = None
+        self.rejoin_channel_password: str = ""
         self._closed = False
 
     def _load_configured_sdk(self) -> Any:
@@ -658,6 +687,9 @@ class TeamTalkSession:
                 if failure is not None
             }
             if event in failure_events:
+                self.connected = False
+                self.logged_in = False
+                self.channel_id = None
                 raise TeamTalkError(f"{action} failed: {self._error_text(message) or 'connection event'}")
             if event == command_error:
                 source = sdk_int(getattr(message, "nSource", -1), -1)
@@ -676,11 +708,9 @@ class TeamTalkSession:
             raise TeamTalkError(f"{action} was rejected by TeamTalk{(': ' + detail) if detail else ''}")
         return command
 
-    def open(self) -> None:
-        if self.connected:
-            if not self.logged_in:
-                self.login()
-            return
+    def _connect_and_login(self) -> None:
+        """Establish the TCP/UDP connection and log in (no channel join)."""
+
         try:
             connected = self.client.connect(
                 sdk_string(self.sdk, self.config.host),
@@ -699,13 +729,101 @@ class TeamTalkSession:
             raise TeamTalkSDKError("the loaded SDK has no connection-success event")
         self._wait_for({success}, "connection")
         self.connected = True
-
         self.login()
 
-        if self.config.channel_id is not None:
+    def open(self) -> None:
+        if self.connected:
+            if not self.logged_in:
+                self.login()
+            return
+        self._connect_and_login()
+        self._rejoin_working_channel()
+
+    def _rejoin_working_channel(self) -> None:
+        """Rejoin the channel this session should be in.
+
+        Prefers an explicitly assigned working channel (set by bots that join
+        an arbitrary, discovered channel) and falls back to the configured
+        channel.  No-op when neither is set.
+        """
+
+        if self.rejoin_channel_id is not None:
+            self.join_channel(self.rejoin_channel_id, self.rejoin_channel_password)
+        elif self.config.channel_id is not None:
             self.join_channel(self.config.channel_id, self.config.channel_password)
         elif self.config.channel_path:
             self.join_channel_path(self.config.channel_path, self.config.channel_password)
+
+    def is_online(self) -> bool:
+        """Non-destructive online probe: connected, logged in, and known to the server.
+
+        Uses ``getMyUserID`` so an idle bot notices a server kick that arrived
+        while it was sleeping without consuming queued events.
+        """
+
+        if self._closed or not self.connected or not self.logged_in:
+            return False
+        try:
+            return sdk_int(self.client.getMyUserID(), -1) > 0
+        except Exception:
+            return False
+
+    def reconnect(self) -> bool:
+        """Rebuild the native client and re-establish connection + login.
+
+        The configured channel is rejoined on a best-effort basis; a failed
+        rejoin does not undo a successful reconnect.  Returns True if online.
+        """
+
+        old = self.client
+        try:
+            old.closeTeamTalk()
+        except Exception:
+            pass
+        try:
+            old.closeTeamTalk = lambda: True  # type: ignore[method-assign]
+        except Exception:
+            pass
+        self.connected = False
+        self.logged_in = False
+        self.channel_id = None
+        try:
+            self.client = self.sdk.TeamTalk()
+        except Exception as exc:
+            raise TeamTalkSDKError(f"failed to reinitialize TeamTalk: {exc}") from exc
+        try:
+            self._connect_and_login()
+        except Exception as exc:
+            print(f"[kick-resistance] reconnect failed: {exc}")
+            return False
+        try:
+            self._rejoin_working_channel()
+        except Exception as exc:
+            print(f"[kick-resistance] could not rejoin channel: {exc}")
+        return self.is_online()
+
+    def check_and_reconnect(self) -> bool:
+        """Wait the reconnect delay, then reconnect if still offline.
+
+        Implements kick resistance: after a suspected kick the bot waits
+        ``reconnect_delay`` seconds, checks whether it is still online, and
+        if not rebuilds the connection so the caller can resume.  When kick
+        resistance is disabled this only reports the current online status
+        without reconnecting, so the caller can stop cleanly.
+        """
+
+        if self.config.reconnect_delay > 0:
+            time.sleep(self.config.reconnect_delay)
+        if self.is_online():
+            return True
+        if not self.config.kick_resistance:
+            return False
+        print("[kick-resistance] reconnecting after disconnect…")
+        try:
+            return self.reconnect()
+        except Exception as exc:
+            print(f"[kick-resistance] reconnect failed: {exc}")
+            return False
 
     def login(self) -> None:
         """Log in on an established TeamTalk connection."""

@@ -85,11 +85,17 @@ def run_cycles(*, config, cycles: int, interval: float, wait: float) -> int:
 
     with TeamTalkSession(config) as session:
         for index in range(cycles):
-            if index:
-                session.login()
-            print(f"Cycle {index + 1}/{cycles}: logged in.")
-            session.logout()
-            print(f"Cycle {index + 1}/{cycles}: logged out.")
+            try:
+                if index:
+                    session.login()
+                print(f"Cycle {index + 1}/{cycles}: logged in.")
+                session.logout()
+                print(f"Cycle {index + 1}/{cycles}: logged out.")
+            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                print(f"[kick-resistance] cycle {index + 1} interrupted: {exc}")
+                if not session.check_and_reconnect():
+                    print("Could not reconnect; stopping login/logout test.")
+                    return 1
             if index + 1 < cycles and interval:
                 time.sleep(interval)
     print("Finished login/logout test.")

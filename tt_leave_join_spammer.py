@@ -85,22 +85,31 @@ def run_cycles(*, config, cycles: int, interval: float, wait: float) -> int:
         time.sleep(wait)
 
     with TeamTalkSession(config) as session:
+        if config.channel_id is not None:
+            session.rejoin_channel_id = config.channel_id
+            session.rejoin_channel_password = config.channel_password
         for index in range(cycles):
-            current_channel = session.current_channel_id()
-            session.leave_channel()
-            print(f"Cycle {index + 1}/{cycles}: left channel {current_channel}.")
-            time.sleep(interval)
-            if config.channel_id is not None:
-                joined_channel = session.join_channel(
-                    config.channel_id,
-                    config.channel_password,
-                )
-            else:
-                joined_channel = session.join_channel_path(
-                    config.channel_path or "/",
-                    config.channel_password,
-                )
-            print(f"Cycle {index + 1}/{cycles}: joined channel {joined_channel}.")
+            try:
+                current_channel = session.current_channel_id()
+                session.leave_channel()
+                print(f"Cycle {index + 1}/{cycles}: left channel {current_channel}.")
+                time.sleep(interval)
+                if config.channel_id is not None:
+                    joined_channel = session.join_channel(
+                        config.channel_id,
+                        config.channel_password,
+                    )
+                else:
+                    joined_channel = session.join_channel_path(
+                        config.channel_path or "/",
+                        config.channel_password,
+                    )
+                print(f"Cycle {index + 1}/{cycles}: joined channel {joined_channel}.")
+            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                print(f"[kick-resistance] cycle {index + 1} interrupted: {exc}")
+                if not session.check_and_reconnect():
+                    print("Could not reconnect; stopping leave/join test.")
+                    return 1
             if index + 1 < cycles:
                 time.sleep(interval)
     print("Finished leave/join test.")

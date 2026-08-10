@@ -350,15 +350,24 @@ def print_discovery(
 
 def run_login_logout_cycles(
     session: TeamTalkSession, cycles: int, interval: float
-) -> None:
+) -> bool:
+    """Run login/logout cycles.  Returns False if a kick could not be recovered."""
+
     for index in range(cycles):
-        if not session.logged_in:
-            session.login()
-        print(f"Auth cycle {index + 1}/{cycles}: logged in.")
-        session.logout()
-        print(f"Auth cycle {index + 1}/{cycles}: logged out.")
+        try:
+            if not session.logged_in:
+                session.login()
+            print(f"Auth cycle {index + 1}/{cycles}: logged in.")
+            session.logout()
+            print(f"Auth cycle {index + 1}/{cycles}: logged out.")
+        except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+            print(f"[kick-resistance] auth cycle {index + 1} interrupted: {exc}")
+            if not session.check_and_reconnect():
+                print("Could not reconnect; stopping login/logout cycles.")
+                return False
         if index + 1 < cycles:
             pause(interval)
+    return True
 
 
 def run_channel_operations(
@@ -381,22 +390,30 @@ def run_channel_operations(
         password_required = bool(channel.get("password_required"))
         if password_required and not channel_password:
             print(f"Channel {channel_name} requires a password; attempting configured credentials.")
+        session.rejoin_channel_id = channel_id
+        session.rejoin_channel_password = channel_password
         for cycle in range(cycles):
-            session.join_channel(channel_id, channel_password)
-            print(
-                f"Channel {channel_name}: joined cycle {cycle + 1}/{cycles}."
-            )
-            if channel_message is not None:
-                for message_index in range(message_count):
-                    session.send_channel_message(channel_message, channel_id)
-                    print(
-                        f"Channel {channel_name}: sent message "
-                        f"{message_index + 1}/{message_count}."
-                    )
-                    if message_index + 1 < message_count:
-                        pause(interval)
-            session.leave_channel()
-            print(f"Channel {channel_name}: left cycle {cycle + 1}/{cycles}.")
+            try:
+                session.join_channel(channel_id, channel_password)
+                print(
+                    f"Channel {channel_name}: joined cycle {cycle + 1}/{cycles}."
+                )
+                if channel_message is not None:
+                    for message_index in range(message_count):
+                        session.send_channel_message(channel_message, channel_id)
+                        print(
+                            f"Channel {channel_name}: sent message "
+                            f"{message_index + 1}/{message_count}."
+                        )
+                        if message_index + 1 < message_count:
+                            pause(interval)
+                session.leave_channel()
+                print(f"Channel {channel_name}: left cycle {cycle + 1}/{cycles}.")
+            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                print(f"[kick-resistance] {channel_name} cycle {cycle + 1} interrupted: {exc}")
+                if not session.check_and_reconnect():
+                    print("Could not reconnect; stopping channel operations.")
+                    return
             if cycle + 1 < cycles:
                 pause(interval)
 
@@ -408,16 +425,26 @@ def run_private_operations(
     message: str,
     message_count: int,
     interval: float,
-) -> None:
+) -> bool:
+    """Send private messages.  Returns False if a kick could not be recovered."""
+
     for message_index in range(message_count):
         for recipient_index, user_id in enumerate(user_ids, start=1):
-            session.send_private_message(message, int(user_id))
+            try:
+                session.send_private_message(message, int(user_id))
+            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                print(f"[kick-resistance] private message interrupted: {exc}")
+                if not session.check_and_reconnect():
+                    print("Could not reconnect; stopping private operations.")
+                    return False
+                continue
             print(
                 f"Private message {message_index + 1}/{message_count} "
                 f"to user {user_id} ({recipient_index}/{len(user_ids)} users)."
             )
             if recipient_index < len(user_ids) or message_index + 1 < message_count:
                 pause(interval)
+    return True
 
 
 def _bot_pause(interval: float, stop_event: threading.Event) -> bool:
@@ -454,7 +481,14 @@ def _user_bot(
             if stop_event.is_set():
                 return
             for recipient_index, user_id in enumerate(user_ids, start=1):
-                session.send_private_message(message, int(user_id))
+                try:
+                    session.send_private_message(message, int(user_id))
+                except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                    print(f"[user-bot] send interrupted: {exc}")
+                    if not session.check_and_reconnect():
+                        print("[user-bot] could not reconnect; stopping.")
+                        return
+                    continue
                 print(
                     f"[user-bot] private message {message_index + 1}/{count} "
                     f"to user {user_id} ({recipient_index}/{len(user_ids)} users)."
@@ -492,6 +526,8 @@ def _channel_bot(
                     f"[channel-bot] {channel_name} requires a password; "
                     "attempting configured credentials."
                 )
+            session.rejoin_channel_id = channel_id
+            session.rejoin_channel_password = channel_password
             for cycle in range(cycles):
                 if stop_event.is_set():
                     return
@@ -508,7 +544,14 @@ def _channel_bot(
                     for message_index in range(count):
                         if stop_event.is_set():
                             return
-                        session.send_channel_message(channel_message, channel_id)
+                        try:
+                            session.send_channel_message(channel_message, channel_id)
+                        except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                            print(f"[channel-bot] send interrupted: {exc}")
+                            if not session.check_and_reconnect():
+                                print("[channel-bot] could not reconnect; stopping.")
+                                return
+                            continue
                         print(
                             f"[channel-bot] {channel_name}: sent message "
                             f"{message_index + 1}/{count}."
@@ -517,7 +560,14 @@ def _channel_bot(
                             interval, stop_event
                         ):
                             return
-                session.leave_channel()
+                try:
+                    session.leave_channel()
+                except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                    print(f"[channel-bot] leave interrupted: {exc}")
+                    if not session.check_and_reconnect():
+                        print("[channel-bot] could not reconnect; stopping.")
+                        return
+                    continue
                 print(
                     f"[channel-bot] {channel_name}: left cycle "
                     f"{cycle + 1}/{cycles}."
@@ -541,11 +591,17 @@ def _churn_bot(
         for i in range(cycles):
             if stop_event.is_set():
                 return
-            if i:
-                session.login()
-            print(f"{tag} cycle {i + 1}/{cycles}: logged in.")
-            session.logout()
-            print(f"{tag} cycle {i + 1}/{cycles}: logged out.")
+            try:
+                if i:
+                    session.login()
+                print(f"{tag} cycle {i + 1}/{cycles}: logged in.")
+                session.logout()
+                print(f"{tag} cycle {i + 1}/{cycles}: logged out.")
+            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                print(f"{tag} cycle {i + 1} interrupted: {exc}")
+                if not session.check_and_reconnect():
+                    print(f"{tag} could not reconnect; stopping.")
+                    return
             if i + 1 < cycles and _bot_pause(interval, stop_event):
                 return
 
@@ -716,9 +772,14 @@ def execute(config: Any, args: argparse.Namespace) -> int:
             return 0
 
         if args.login_cycles:
-            run_login_logout_cycles(session, args.login_cycles, args.interval)
+            if not run_login_logout_cycles(session, args.login_cycles, args.interval):
+                print("Finished TeamTalk suite (interrupted).")
+                return 1
 
         needs_operations = bool(selected_channels or args.private_message is not None)
+        if needs_operations and not session.is_online():
+            print("Session is offline; cannot continue channel/private operations.")
+            return 1
         if needs_operations and not session.logged_in:
             session.login()
             print("Logged back in for requested test operations.")
@@ -738,13 +799,15 @@ def execute(config: Any, args: argparse.Namespace) -> int:
                 raise TeamTalkConfigurationError(
                     "no online users matched the private-message selection"
                 )
-            run_private_operations(
+            if not run_private_operations(
                 session,
                 selected_users,
                 message=args.private_message,
                 message_count=args.message_count,
                 interval=args.interval,
-            )
+            ):
+                print("Finished TeamTalk suite (interrupted).")
+                return 1
     print("Finished TeamTalk suite.")
     return 0
 
@@ -833,6 +896,8 @@ def interactive_run() -> int:
         interval=interval,
         dry_run=False,
         confirm=confirm,
+        kick_resistance=config.kick_resistance,
+        reconnect_delay=config.reconnect_delay,
         channel_id=config.channel_id,
         channel_path=config.channel_path,
     )

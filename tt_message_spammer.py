@@ -250,6 +250,8 @@ def prompt_channel(session) -> None:
             secret=True,
         )
     session.join_channel(int(selected["id"]), password)
+    session.rejoin_channel_id = int(selected["id"])
+    session.rejoin_channel_password = password
     print(f"Joined {selected.get('path') or selected.get('name') or selected['id']}.")
 
 
@@ -371,27 +373,39 @@ def send_messages_on_session(
 
     total_sends = count * len(recipient_ids) if target == "private" else count
     sent_count = 0
+    if target == "channel":
+        try:
+            session.rejoin_channel_id = session.current_channel_id()
+            session.rejoin_channel_password = session.config.channel_password
+        except TeamTalkError:
+            pass
     for index in range(count):
-        if target == "private":
-            for recipient_index, recipient_id in enumerate(recipient_ids, start=1):
-                session.send_private_message(message, recipient_id)
+        try:
+            if target == "private":
+                for recipient_index, recipient_id in enumerate(recipient_ids, start=1):
+                    session.send_private_message(message, recipient_id)
+                    sent_count += 1
+                    if len(recipient_ids) == 1:
+                        print(f"Sent {index + 1}/{count} to user {recipient_id}.")
+                    else:
+                        print(
+                            f"Sent message {index + 1}/{count} to user {recipient_id} "
+                            f"({recipient_index}/{len(recipient_ids)} recipients)."
+                        )
+                    if sent_count < total_sends and interval:
+                        time.sleep(interval)
+            else:
+                channel_id = session.current_channel_id()
+                session.send_channel_message(message, channel_id)
                 sent_count += 1
-                if len(recipient_ids) == 1:
-                    print(f"Sent {index + 1}/{count} to user {recipient_id}.")
-                else:
-                    print(
-                        f"Sent message {index + 1}/{count} to user {recipient_id} "
-                        f"({recipient_index}/{len(recipient_ids)} recipients)."
-                    )
+                print(f"Sent {index + 1}/{count} to channel {channel_id}.")
                 if sent_count < total_sends and interval:
                     time.sleep(interval)
-        else:
-            channel_id = session.current_channel_id()
-            session.send_channel_message(message, channel_id)
-            sent_count += 1
-            print(f"Sent {index + 1}/{count} to channel {channel_id}.")
-            if sent_count < total_sends and interval:
-                time.sleep(interval)
+        except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+            print(f"[kick-resistance] send {index + 1} interrupted: {exc}")
+            if not session.check_and_reconnect():
+                print("Could not reconnect; stopping message test.")
+                return 1
     print("Finished sending.")
     return 0
 
