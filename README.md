@@ -61,9 +61,53 @@ gh run watch        # wait for completion
 gh run download <run-id>   # pulls both artifact zips
 ```
 
-The public SDK is a 30-day trial, so binaries built from it stop working after
-30 days; switch the workflow's `sdk_url` values to the Pro edition for a
-permanent build.
+### Trial expiration (the 30-day SDK limit)
+
+The binaries bundle BearWare.dk's **public TeamTalk SDK trial**. It runs in
+"TRAIL MODE" and **self-disables after 30 days of use**. The TeamTalk *tools*
+themselves never expire — only the bundled SDK connection layer does. After the
+trial lapses a tool still launches and prints `--help`, but it can no longer
+connect to a server.
+
+To keep the binaries working past 30 days, do one of the following:
+
+- **Re-download (or rebuild) a fresh binary.** Each freshly built binary bundles
+  the then-current SDK trial, giving a new trial window. Re-download from the
+  GitHub *Releases* page, or re-run the build workflow. Re-downloading the
+  *same* build will not reset a trial that has already expired — to get a new
+  window you need a build that bundles a **newer** SDK release. When BearWare.dk
+  publishes a newer SDK, bump the `sdk_url` values in
+  `.github/workflows/build-binaries.yml` and re-run the workflow. In practice:
+  come back roughly every 30 days and grab the latest release.
+- **Activate your own TeamTalk SDK license (removes the limit entirely).** A
+  one-time, royalty-free TeamTalk SDK license from BearWare.dk (Standard edition,
+  ~€990, all platforms) comes with a registration name and key. Pass them to the
+  tools and the 30-day limit is gone for everyone who downloads the release:
+
+  ```bash
+  # environment variables (preferred — keeps the key out of shell history):
+  export TT_LICENSE_NAME="Your Name"
+  export TT_LICENSE_KEY="your-serial-key"
+  ./tt-suite --host your.server --all-channels --all-users --channel-message 'hi' --confirm
+
+  # or flags:
+  ./tt-suite --license-name "Your Name" --license-key "your-serial-key" \
+    --host your.server --all-channels --all-users --channel-message 'hi' --confirm
+  ```
+
+  For a release that is permanently non-expiring, build against the **licensed**
+  SDK (set the workflow's `sdk_url` to the licensed edition) — the licensed
+  DLLs are not time-bombed. The license key still needs to reach the running
+  binary, so either distribute the key alongside the release and have users set
+  `TT_LICENSE_NAME` / `TT_LICENSE_KEY` (the license is royalty-free, so this is
+  permitted), or wire a build-time default into `build_binaries.py` if you want
+  the key shipped inside the executable.
+
+When no license name/key are supplied the activation call is skipped, so trial
+builds behave exactly as before. See BearWare.dk's
+[SDK license page](https://bearware.dk/?page_id=316) and the
+[C-API license notes](https://www.bearware.dk/teamtalksdk/v5.22a/docs/C-API/license.html)
+for pricing and terms.
 
 ## Linux entry points
 

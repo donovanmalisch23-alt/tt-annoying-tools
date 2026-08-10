@@ -315,6 +315,8 @@ class ConnectionConfig:
     sdk_path: Optional[str] = None
     sdk_python: Optional[str] = None
     sdk_library: Optional[str] = None
+    license_name: Optional[str] = None
+    license_key: str = ""
 
 
 def prompt_text(label: str, default: Optional[str] = None, *, secret: bool = False) -> str:
@@ -462,6 +464,8 @@ def prompt_connection_config(*, channel_required: bool) -> ConnectionConfig:
         sdk_path=os.environ.get("TEAMTALK_SDK_PATH"),
         sdk_python=os.environ.get("TEAMTALK_SDK_PYTHON"),
         sdk_library=os.environ.get("TEAMTALK_SDK_LIBRARY") or os.environ.get("TEAMTALK_LIBRARY"),
+        license_name=os.environ.get("TT_LICENSE_NAME"),
+        license_key=os.environ.get("TT_LICENSE_KEY") or "",
     )
 
 
@@ -568,6 +572,18 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         default=os.environ.get("TEAMTALK_SDK_LIBRARY") or os.environ.get("TEAMTALK_LIBRARY"),
         help="path to libTeamTalk5.so",
     )
+    parser.add_argument(
+        "--license-name",
+        default=os.environ.get("TT_LICENSE_NAME"),
+        help="TeamTalk SDK license registration name (or set TT_LICENSE_NAME). "
+        "Supply with --license-key to disable the 30-day SDK trial.",
+    )
+    parser.add_argument(
+        "--license-key",
+        default=os.environ.get("TT_LICENSE_KEY"),
+        help="TeamTalk SDK license key (or set TT_LICENSE_KEY). "
+        "Use a password manager or env var; avoid passing keys on the command line.",
+    )
 
 
 def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
@@ -611,6 +627,8 @@ def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
         sdk_path=args.sdk_path,
         sdk_python=args.sdk_python,
         sdk_library=args.sdk_library,
+        license_name=args.license_name,
+        license_key=args.license_key or "",
     )
 
 
@@ -735,9 +753,31 @@ class TeamTalkSession:
             raise TeamTalkError(f"{action} was rejected by TeamTalk{(': ' + detail) if detail else ''}")
         return command
 
+    def _apply_license(self) -> None:
+        """Activate a purchased TeamTalk SDK license if one is configured.
+
+        ``setLicense`` is a no-op when no name/key are set, so trial builds
+        are unaffected.  It is a process-global SDK call, so it is enough to
+        run it before connect; a failure is logged but does not block the
+        connection (the SDK then falls back to TRAIL MODE).
+        """
+        name = self.config.license_name
+        if not name:
+            return
+        try:
+            ok = self.sdk.setLicense(sdk_string(self.sdk, name), sdk_string(self.sdk, self.config.license_key))
+        except Exception as exc:  # pragma: no cover - depends on SDK build
+            print(f"[license] setLicense failed: {exc}")
+            return
+        if ok:
+            print("[license] TeamTalk SDK license accepted; trial mode disabled.")
+        else:
+            print("[license] TeamTalk SDK rejected the license key; running in TRAIL MODE.")
+
     def _connect_and_login(self) -> None:
         """Establish the TCP/UDP connection and log in (no channel join)."""
 
+        self._apply_license()
         try:
             connected = self.client.connect(
                 sdk_string(self.sdk, self.config.host),
