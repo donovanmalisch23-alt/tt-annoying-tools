@@ -97,6 +97,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def config_dir() -> Path:
+    """Directory for user-facing config files (whitelist.txt, teamtalk.env).
+
+    When frozen by PyInstaller, a script's own ``__file__`` points into a
+    temporary extraction directory (``_MEIPASS``) that is wiped after the run,
+    so user config is resolved relative to the executable instead — the
+    folder the binary is run from.  When not frozen, the script's directory
+    is used as before.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def _load_project_env() -> None:
     """Load local non-shell configuration without overriding exported values."""
 
@@ -104,7 +118,7 @@ def _load_project_env() -> None:
     env_path = (
         Path(configured_file).expanduser()
         if configured_file
-        else Path(__file__).resolve().with_name("teamtalk.env")
+        else config_dir() / "teamtalk.env"
     )
     if not env_path.is_file():
         return

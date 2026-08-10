@@ -24,6 +24,7 @@ from tt_teamtalk import (
     TeamTalkError,
     TeamTalkSession,
     add_connection_arguments,
+    config_dir,
     config_from_args,
     print_tool_error,
     prompt_connection_config,
@@ -34,7 +35,9 @@ from tt_teamtalk import (
 )
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
+# When frozen by PyInstaller, __file__ is inside a temp extraction dir, so
+# resolve config relative to the executable (where the user runs the binary).
+PROJECT_DIR = config_dir()
 DEFAULT_WHITELIST = PROJECT_DIR / "whitelist.txt"
 DEFAULT_INTERVAL = 0.2
 DEFAULT_MESSAGE_COUNT = 1
