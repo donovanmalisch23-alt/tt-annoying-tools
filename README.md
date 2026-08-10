@@ -37,6 +37,34 @@ command-line options. For a nonstandard SDK layout, use
 The SDK itself may require a valid TeamTalk SDK license/trial according to its
 license terms. No native SDK binaries are bundled in this repository.
 
+## Building standalone binaries
+
+`build_binaries.py` freezes each tool into a one-file executable with
+PyInstaller, bundling `TeamTalk5.py` and the native library so the result runs
+without a separate SDK install. Locally (on a machine with pip and the SDK
+extracted):
+
+```bash
+pip install pyinstaller
+TEAMTALK_SDK_PATH=/path/to/extracted/sdk python3 build_binaries.py
+# executables appear in dist/
+```
+
+The GitHub Actions workflow `.github/workflows/build-binaries.yml` builds both
+platforms automatically — it downloads the TeamTalk SDK for each OS, builds, and
+uploads `tt-linux-x86_64` and `tt-windows-x64` artifacts. Trigger it from the
+Actions tab or:
+
+```bash
+gh workflow run build-binaries.yml
+gh run watch        # wait for completion
+gh run download <run-id>   # pulls both artifact zips
+```
+
+The public SDK is a 30-day trial, so binaries built from it stop working after
+30 days; switch the workflow's `sdk_url` values to the Pro edition for a
+permanent build.
+
 ## Linux entry points
 
 All of these are ordinary Python 3 programs and call TeamTalk directly:

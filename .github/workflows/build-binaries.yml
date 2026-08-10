@@ -1,0 +1,82 @@
+name: Build binaries
+
+# Build standalone Windows (.exe) and Linux executables for the TeamTalk
+# tools with PyInstaller.  The TeamTalk 5 SDK is downloaded per platform and
+# bundled into each executable so the result runs without a separate SDK
+# install.  The public SDK is a 30-day trial; a licensed SDK is needed for a
+# permanent build (swap the SDK URLs below to the Pro edition if required).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+      - 'build_binaries.py'
+      - '.github/workflows/build-binaries.yml'
+
+jobs:
+  build:
+    name: Build (${{ matrix.artifact }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            sdk_url: https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z
+            artifact: tt-linux-x86_64
+          - os: windows-latest
+            sdk_url: https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.7z
+            artifact: tt-windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install 7-Zip (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Download and extract TeamTalk SDK
+        shell: bash
+        run: |
+          curl -fsSL -o sdk.7z "$SDK_URL"
+          7z x sdk.7z -osdk -y
+          echo "Extracted SDK tree:"
+          find sdk -maxdepth 3 | head -60
+        env:
+          SDK_URL: ${{ matrix.sdk_url }}
+
+      - name: Set TEAMTALK_SDK_PATH
+        shell: bash
+        run: |
+          # Prefer the directory that contains the Library/ subtree (SDK root).
+          root="$(find sdk -type d -name Library -printf '%h\n' | head -1)"
+          if [ -z "$root" ]; then
+            # Fall back to the directory that contains TeamTalk5.py.
+            root="$(find sdk -name TeamTalk5.py -printf '%h\n' | head -1)"
+          fi
+          if [ -z "$root" ]; then
+            echo "Could not locate the SDK root." >&2
+            exit 1
+          fi
+          echo "SDK root: $root"
+          echo "TEAMTALK_SDK_PATH=$root" >> "$GITHUB_ENV"
+
+      - name: Build executables
+        run: python build_binaries.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
