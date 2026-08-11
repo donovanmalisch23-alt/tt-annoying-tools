@@ -180,9 +180,26 @@ There is no built-in ceiling on how many bots, messages, or cycles you request
 — `--churn-bots`, `--message-count`, and `--churn-cycles` accept any positive
 integer, so the practical limit is your server's own max-user setting and what
 your test machine can sustain. The discovery connection and every bot still go
-through `whitelist.txt` + `--confirm` + `--dry-run`, and every run terminates
-because the counts you pass are finite. Without `--concurrent` the suite keeps
-its original sequential single-session behavior.
+through `whitelist.txt` + `--confirm` + `--dry-run`. Without `--concurrent` the
+suite keeps its original sequential single-session behavior.
+
+With `--all-users` (or `--user-id all`) the user-bot runs in **continuous
+mode**: instead of messaging a fixed list once, it keeps re-discovering the
+online users and messages every joiner it has not messaged yet, each receiving
+`--message-count` messages, with no repeats. It stays running until you stop it
+with Ctrl+C (the churn-bots and channel-bot still finish their finite counts and
+exit on their own). This is the mode to use when you want the bot to notice
+people who connect *after* the run starts:
+
+```bash
+# Keep DMing every current user and any new joiner until Ctrl+C:
+python3 tt_suite.py --concurrent --all-users \
+  --private-message 'welcome aboard' --message-count 1 --interval 1.0 --confirm
+```
+
+Continuous mode only changes the user-bot. The `--channel-message` bot and any
+`--churn-bots` still terminate after their finite counts as usual, so the run
+ends when you interrupt the user-bot and those bots have finished.
 
 ### Kick resistance (all tools)
 

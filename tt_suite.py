@@ -151,7 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--all-users",
         action="store_true",
-        help="select every discovered online user for private messages",
+        help="select every online user for private messages; in --concurrent "
+        "mode the user-bot runs continuously and also messages users who join "
+        "after the run starts (no repeats, until interrupted)",
     )
     parser.add_argument(
         "--all-channels",
@@ -194,7 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--concurrent",
         action="store_true",
         help="run the selected actions as concurrent bots (one per concern) "
-        "instead of sequentially in a single session",
+        "instead of sequentially in a single session. With --all-users the "
+        "user-bot runs continuously and messages new joiners until interrupted",
     )
     parser.add_argument(
         "--churn-bots",
@@ -470,35 +473,112 @@ def _bot_config(base: Any, nickname: str) -> Any:
     )
 
 
+class _BotStop(Exception):
+    """Raised inside a bot to signal it should stop (reconnect failed)."""
+
+
+def _send_to_user(
+    session: TeamTalkSession,
+    user_id: int,
+    display_name: str,
+    message: str,
+    count: int,
+    interval: float,
+    stop_event: threading.Event,
+) -> bool:
+    """Send ``count`` messages to one user.  Returns True if all sent."""
+
+    for message_index in range(count):
+        if stop_event.is_set():
+            return False
+        try:
+            session.send_private_message(message, user_id)
+        except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+            print(f"[user-bot] send to {display_name} interrupted: {exc}")
+            if not session.check_and_reconnect():
+                print("[user-bot] could not reconnect; stopping.")
+                raise _BotStop
+            return False
+        print(
+            f"[user-bot] messaged {display_name} (user {user_id}) "
+            f"{message_index + 1}/{count}."
+        )
+        if message_index + 1 < count and _bot_pause(interval, stop_event):
+            return False
+    return True
+
+
 def _user_bot(
     base_config: Any,
     user_ids: Sequence[int],
+    all_users: bool,
     message: str,
     count: int,
     interval: float,
     stop_event: threading.Event,
 ) -> None:
     config = _bot_config(base_config, f"{base_config.nickname}-users")
-    with TeamTalkSession(config) as session:
-        for message_index in range(count):
-            if stop_event.is_set():
-                return
-            for recipient_index, user_id in enumerate(user_ids, start=1):
+
+    if not all_users:
+        # Finite mode: message the explicit user-ID list, ``count`` each.
+        with TeamTalkSession(config) as session:
+            for user_id in user_ids:
+                if stop_event.is_set():
+                    return
                 try:
-                    session.send_private_message(message, int(user_id))
-                except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
-                    print(f"[user-bot] send interrupted: {exc}")
-                    if not session.check_and_reconnect():
-                        print("[user-bot] could not reconnect; stopping.")
+                    sent_all = _send_to_user(
+                        session, int(user_id), str(user_id), message, count,
+                        interval, stop_event,
+                    )
+                except _BotStop:
+                    return
+                if not sent_all:
+                    # Stopped, or a recoverable failure after a successful
+                    # reconnect: move on to the next user (no retry).
+                    if stop_event.is_set():
                         return
                     continue
-                print(
-                    f"[user-bot] private message {message_index + 1}/{count} "
-                    f"to user {user_id} ({recipient_index}/{len(user_ids)} users)."
-                )
-                if recipient_index < len(user_ids) or message_index + 1 < count:
-                    if _bot_pause(interval, stop_event):
-                        return
+                if _bot_pause(interval, stop_event):
+                    return
+        return
+
+    # Continuous mode: keep re-discovering users and message any new joiner
+    # that has not been messaged yet, until stopped.  Each new user receives
+    # ``count`` messages and is then recorded so a later sweep skips them.
+    messaged: set[int] = set()
+    # Avoid a busy loop re-querying the server when --interval is zero.
+    sweep_pause = interval or 1.0
+    with TeamTalkSession(config) as session:
+        print("[user-bot] watching for users; press Ctrl+C to stop.")
+        while not stop_event.is_set():
+            try:
+                users = session.list_users(include_self=False)
+            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                print(f"[user-bot] discovery interrupted: {exc}")
+                if not session.check_and_reconnect():
+                    print("[user-bot] could not reconnect; stopping.")
+                    return
+                continue
+            new_users = [
+                user for user in users
+                if int(user["id"]) not in messaged
+            ]
+            for user in new_users:
+                if stop_event.is_set():
+                    return
+                user_id = int(user["id"])
+                display = str(user.get("display_name") or f"user {user_id}")
+                try:
+                    sent_all = _send_to_user(
+                        session, user_id, display, message, count, interval,
+                        stop_event,
+                    )
+                except _BotStop:
+                    return
+                if sent_all:
+                    messaged.add(user_id)
+            if _bot_pause(sweep_pause, stop_event):
+                return
 
 
 def _channel_bot(
@@ -643,17 +723,28 @@ def _run_concurrent(
     elif selected_channels:
         print(f"Selected {len(selected_channels)} channel(s).")
 
-    if args.private_message is not None and not selected_users:
+    if (
+        args.private_message is not None
+        and not all_users
+        and not selected_users
+    ):
         raise TeamTalkConfigurationError(
             "no online users matched the private-message selection"
         )
 
     plan_lines = ["Concurrent bot plan:"]
     if args.private_message is not None:
-        plan_lines.append(
-            f"  1 user-bot: {args.message_count} private message(s) to "
-            f"{len(selected_users)} user(s)."
-        )
+        if all_users:
+            plan_lines.append(
+                f"  1 user-bot (continuous): message every online user and any "
+                f"new joiner ({args.message_count} message(s) each, no repeats) "
+                "until interrupted."
+            )
+        else:
+            plan_lines.append(
+                f"  1 user-bot: {args.message_count} private message(s) to "
+                f"{len(selected_users)} user(s)."
+            )
     if channel_action:
         plan_lines.append(f"  1 channel-bot: {len(selected_channels)} channel(s).")
     if args.churn_bots > 0:
@@ -676,6 +767,7 @@ def _run_concurrent(
                 args=(
                     config,
                     selected_users,
+                    all_users,
                     args.private_message,
                     args.message_count,
                     args.interval,
