@@ -220,6 +220,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"seconds between operations; zero is allowed (default: {DEFAULT_INTERVAL:g})",
     )
     parser.add_argument(
+        "--sweep-interval",
+        type=float,
+        default=0.5,
+        help="seconds between new-user discovery sweeps in continuous --all-users "
+        "mode; the user-bot pumps the SDK event queue and re-checks for joiners "
+        "this often (default: 0.5, i.e. every 500 ms)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="discover and print targets without sending or joining",
@@ -509,6 +517,33 @@ def _send_to_user(
     return True
 
 
+def _drain_events(
+    session: TeamTalkSession,
+    stop_event: threading.Event,
+    window_s: float,
+) -> bool:
+    """Pump the SDK event queue so the server-user roster stays current.
+
+    TeamTalk only learns about users who log in after we started once the
+    client processes the incoming ``USER_LOGGEDIN``/``USER_JOINED`` events via
+    ``getMessage()``.  ``getServerUsers()`` reads that in-memory roster, so if
+    the queue is never pumped a new joiner is invisible to discovery.  This
+    processes every event that arrives within ``window_s`` seconds (the sweep
+    cadence) and returns.  Returns True if a connection-failure event was seen.
+    """
+
+    deadline = time.monotonic() + window_s
+    while time.monotonic() < deadline and not stop_event.is_set():
+        wait_ms = max(1, int((deadline - time.monotonic()) * 1000))
+        message = session.poll(wait_ms)
+        if not getattr(message, "nClientEvent", 0):
+            # No event within the remaining window: sweep cadence elapsed.
+            break
+        if session.is_connection_failure(message):
+            return True
+    return False
+
+
 def _user_bot(
     base_config: Any,
     user_ids: Sequence[int],
@@ -516,6 +551,7 @@ def _user_bot(
     message: str,
     count: int,
     interval: float,
+    sweep_interval: float,
     stop_event: threading.Event,
 ) -> None:
     config = _bot_config(base_config, f"{base_config.nickname}-users")
@@ -547,11 +583,24 @@ def _user_bot(
     # that has not been messaged yet, until stopped.  Each new user receives
     # ``count`` messages and is then recorded so a later sweep skips them.
     messaged: set[int] = set()
-    # Avoid a busy loop re-querying the server when --interval is zero.
-    sweep_pause = interval or 1.0
+    sweep_interval = max(0.05, float(sweep_interval))
     with TeamTalkSession(config) as session:
-        print("[user-bot] watching for users; press Ctrl+C to stop.")
+        print(
+            f"[user-bot] watching for users; checking every {sweep_interval:g}s. "
+            "Press Ctrl+C to stop."
+        )
         while not stop_event.is_set():
+            # Pump the SDK event queue so getServerUsers() reflects users who
+            # logged in since the last sweep.  Without this the server-user
+            # roster is frozen at our own login and new joiners never appear,
+            # so they are never messaged.  This call also spends the sweep
+            # interval waiting, which is the "check every N seconds" cadence.
+            if _drain_events(session, stop_event, sweep_interval):
+                print("[user-bot] bot lost its connection.")
+                if not session.check_and_reconnect():
+                    print("[user-bot] could not reconnect; stopping.")
+                    return
+                continue
             try:
                 users = session.list_users(include_self=False)
             except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
@@ -578,8 +627,6 @@ def _user_bot(
                     return
                 if sent_all:
                     messaged.add(user_id)
-            if _bot_pause(sweep_pause, stop_event):
-                return
 
 
 def _channel_bot(
@@ -738,8 +785,8 @@ def _run_concurrent(
         if all_users:
             plan_lines.append(
                 f"  1 user-bot (continuous): message every online user and any "
-                f"new joiner ({args.message_count} message(s) each, no repeats) "
-                "until interrupted."
+                f"new joiner ({args.message_count} message(s) each, no repeats), "
+                f"re-checking every {args.sweep_interval:g}s, until interrupted."
             )
         else:
             plan_lines.append(
@@ -772,6 +819,7 @@ def _run_concurrent(
                     args.private_message,
                     args.message_count,
                     args.interval,
+                    args.sweep_interval,
                     stop_event,
                 ),
                 name="user-bot",
@@ -974,6 +1022,13 @@ def interactive_run() -> int:
             churn_cycles = prompt_int(
                 "Login/logout cycles per churn bot", 5, minimum=1
             )
+    sweep_interval = 0.5
+    if concurrent and all_users:
+        sweep_interval = prompt_float(
+            "Seconds between new-user discovery sweeps",
+            0.5,
+            minimum=0.05,
+        )
     confirm = prompt_yes_no("Proceed with the requested test operations?", False)
     args = argparse.Namespace(
         whitelist=Path(os.environ.get("TT_WHITELIST", DEFAULT_WHITELIST)),
@@ -990,6 +1045,7 @@ def interactive_run() -> int:
         churn_bots=churn_bots,
         churn_cycles=churn_cycles,
         interval=interval,
+        sweep_interval=sweep_interval,
         dry_run=False,
         confirm=confirm,
         kick_resistance=config.kick_resistance,

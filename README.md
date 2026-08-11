@@ -191,12 +191,22 @@ online users and messages every joiner it has not messaged yet, each receiving
 `--message-count` messages, with no repeats. It stays running until you stop it
 with Ctrl+C (the churn-bots and channel-bot still finish their finite counts and
 exit on their own). This is the mode to use when you want the bot to notice
-people who connect *after* the run starts:
+people who connect *after* the run starts.
+
+Discovery works by pumping the SDK's event queue each sweep — the TeamTalk
+client only learns a user logged in once it processes the incoming
+`USER_LOGGEDIN` event, so without pumping the roster freezes at the bot's own
+login time and late joiners are invisible. The sweep cadence is
+`--sweep-interval` (default `0.5`, i.e. every 500 ms): the bot drains pending
+events, waits that long, then re-checks `getServerUsers()` and messages anyone
+new. `--interval` remains the pause *between* the `--message-count` messages
+sent to a single user, independent of the sweep cadence.
 
 ```bash
-# Keep DMing every current user and any new joiner until Ctrl+C:
+# Keep DMing every current user and any new joiner, re-checking every 500 ms:
 python3 tt_suite.py --concurrent --all-users \
-  --private-message 'welcome aboard' --message-count 1 --interval 1.0 --confirm
+  --private-message 'welcome aboard' --message-count 1 --sweep-interval 0.5 \
+  --interval 1.0 --confirm
 ```
 
 Continuous mode only changes the user-bot. The `--channel-message` bot and any
