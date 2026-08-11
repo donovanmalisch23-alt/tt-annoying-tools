@@ -148,6 +148,19 @@ def run(args: argparse.Namespace, config=None) -> int:
 
         while args.max_responses == 0 or response_count < args.max_responses:
             message = session.poll(1000)
+            # Catch a server kick the moment the CON_LOST/CON_FAILED event is
+            # dequeued, instead of relying on the getMyUserID() watchdog below.
+            if session.is_connection_failure(message):
+                print("[kick-resistance] bot lost its connection.")
+                if not session.check_and_reconnect():
+                    print("Could not reconnect; stopping bot.")
+                    return 1
+                try:
+                    channel_id = session.current_channel_id()
+                    own_user_id = sdk_int(session.client.getMyUserID(), -1)
+                except TeamTalkError:
+                    pass
+                continue
             watch_now = time.monotonic()
             if watch_now - last_check >= reconnect_delay:
                 last_check = watch_now

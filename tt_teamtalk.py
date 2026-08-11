@@ -15,6 +15,7 @@ import importlib
 import importlib.util
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,14 @@ from typing import Any, Iterable, Optional
 
 TEAMTALK_SDK_DOWNLOAD = "https://bearware.dk/?page_id=419"
 TEAMTALK_SDK_DOCS = "https://www.bearware.dk/teamtalksdk/v5.22a/docs/C-API/"
+
+# Serializes the first SDK import across threads.  _import_sdk_from_file
+# monkeypatches the process-global ctypes.cdll.LoadLibrary while importing
+# the SDK module; without a lock, concurrent bots (tt_suite --concurrent) can
+# race and leave ctypes.cdll.LoadLibrary pointing at a stale wrapper, breaking
+# ctypes for the whole process.  An RLock lets _load_configured_sdk hold the
+# same lock around its env-var mutation while re-entering load_teamtalk_sdk.
+_SDK_LOAD_LOCK = threading.RLock()
 
 
 class TeamTalkError(RuntimeError):
@@ -275,25 +284,26 @@ def load_teamtalk_sdk() -> Any:
     ``TEAMTALK_SDK_PYTHON`` and ``TEAMTALK_SDK_LIBRARY`` explicitly.
     """
 
-    existing = sys.modules.get("TeamTalk5")
-    if existing is not None:
-        return existing
+    with _SDK_LOAD_LOCK:
+        existing = sys.modules.get("TeamTalk5")
+        if existing is not None:
+            return existing
 
-    sdk_python = _find_sdk_python()
-    sdk_library = _find_sdk_library(sdk_python)
+        sdk_python = _find_sdk_python()
+        sdk_library = _find_sdk_library(sdk_python)
 
-    try:
-        if sdk_python is not None:
-            return _import_sdk_from_file(sdk_python, sdk_library)
-        return importlib.import_module("TeamTalk5")
-    except TeamTalkSDKError:
-        raise
-    except Exception as exc:  # pragma: no cover - exact exception is platform-specific
-        raise TeamTalkSDKError(
-            "TeamTalk5.py/libTeamTalk5.so was not found. Download the official "
-            f"TeamTalk SDK from {TEAMTALK_SDK_DOWNLOAD}, extract it, then set "
-            "TEAMTALK_SDK_PATH to its root directory."
-        ) from exc
+        try:
+            if sdk_python is not None:
+                return _import_sdk_from_file(sdk_python, sdk_library)
+            return importlib.import_module("TeamTalk5")
+        except TeamTalkSDKError:
+            raise
+        except Exception as exc:  # pragma: no cover - exact exception is platform-specific
+            raise TeamTalkSDKError(
+                "TeamTalk5.py/libTeamTalk5.so was not found. Download the official "
+                f"TeamTalk SDK from {TEAMTALK_SDK_DOWNLOAD}, extract it, then set "
+                "TEAMTALK_SDK_PATH to its root directory."
+            ) from exc
 
 
 @dataclass(frozen=True)
@@ -650,30 +660,35 @@ class TeamTalkSession:
         self._closed = False
 
     def _load_configured_sdk(self) -> Any:
-        old_path = os.environ.get("TEAMTALK_SDK_PATH")
-        old_python = os.environ.get("TEAMTALK_SDK_PYTHON")
-        old_library = os.environ.get("TEAMTALK_SDK_LIBRARY")
-        if self.config.sdk_path:
-            os.environ["TEAMTALK_SDK_PATH"] = self.config.sdk_path
-        if self.config.sdk_python:
-            os.environ["TEAMTALK_SDK_PYTHON"] = self.config.sdk_python
-        if self.config.sdk_library:
-            os.environ["TEAMTALK_SDK_LIBRARY"] = self.config.sdk_library
-        try:
-            return load_teamtalk_sdk()
-        finally:
-            if old_path is None:
-                os.environ.pop("TEAMTALK_SDK_PATH", None)
-            else:
-                os.environ["TEAMTALK_SDK_PATH"] = old_path
-            if old_python is None:
-                os.environ.pop("TEAMTALK_SDK_PYTHON", None)
-            else:
-                os.environ["TEAMTALK_SDK_PYTHON"] = old_python
-            if old_library is None:
-                os.environ.pop("TEAMTALK_SDK_LIBRARY", None)
-            else:
-                os.environ["TEAMTALK_SDK_LIBRARY"] = old_library
+        # Hold the load lock across the env-var mutation + load + restore so
+        # concurrent bot threads cannot interleave (or observe a half-restored
+        # TEAMTALK_SDK_* environment).  load_teamtalk_sdk re-enters the same
+        # RLock, so there is no deadlock.
+        with _SDK_LOAD_LOCK:
+            old_path = os.environ.get("TEAMTALK_SDK_PATH")
+            old_python = os.environ.get("TEAMTALK_SDK_PYTHON")
+            old_library = os.environ.get("TEAMTALK_SDK_LIBRARY")
+            if self.config.sdk_path:
+                os.environ["TEAMTALK_SDK_PATH"] = self.config.sdk_path
+            if self.config.sdk_python:
+                os.environ["TEAMTALK_SDK_PYTHON"] = self.config.sdk_python
+            if self.config.sdk_library:
+                os.environ["TEAMTALK_SDK_LIBRARY"] = self.config.sdk_library
+            try:
+                return load_teamtalk_sdk()
+            finally:
+                if old_path is None:
+                    os.environ.pop("TEAMTALK_SDK_PATH", None)
+                else:
+                    os.environ["TEAMTALK_SDK_PATH"] = old_path
+                if old_python is None:
+                    os.environ.pop("TEAMTALK_SDK_PYTHON", None)
+                else:
+                    os.environ["TEAMTALK_SDK_PYTHON"] = old_python
+                if old_library is None:
+                    os.environ.pop("TEAMTALK_SDK_LIBRARY", None)
+                else:
+                    os.environ["TEAMTALK_SDK_LIBRARY"] = old_library
 
     def __enter__(self) -> "TeamTalkSession":
         try:
@@ -745,12 +760,16 @@ class TeamTalkSession:
     def _check_command(self, command_id: Any, action: str) -> int:
         command = sdk_int(command_id, -1)
         if command < 0:
-            detail = ""
-            try:
-                detail = sdk_text(self.client.getErrorMessage(-command))
-            except Exception:
-                pass
-            raise TeamTalkError(f"{action} was rejected by TeamTalk{(': ' + detail) if detail else ''}")
+            # TT_Do* functions return -1 for a local (pre-send) failure such as
+            # "not connected" or invalid state.  This is not a ClientError code,
+            # so there is no message to look up via getErrorMessage (passing
+            # -command would look up an unrelated error).  Server-side
+            # rejections arrive later as CLIENTEVENT_CMD_ERROR, handled by
+            # _wait_for, whose ClientErrorMsg carries the real error code.
+            raise TeamTalkError(
+                f"{action} was rejected by TeamTalk locally "
+                "(client not connected or in an invalid state)"
+            )
         return command
 
     def _apply_license(self) -> None:
@@ -834,6 +853,33 @@ class TeamTalkSession:
             return sdk_int(self.client.getMyUserID(), -1) > 0
         except Exception:
             return False
+
+    def is_connection_failure(self, message: Any) -> bool:
+        """Return True if ``message`` is a connection-lost/failed/crypt event.
+
+        Resets the connected/logged_in/channel flags when it is, so an idle
+        event-loop bot that polls ``getMessage`` directly (instead of going
+        through ``_wait_for``) notices a server kick deterministically the
+        moment the event is dequeued — rather than relying on ``getMyUserID``
+        returning <=0 after a disconnect, which the SDK does not guarantee.
+        """
+
+        event = sdk_int(getattr(message, "nClientEvent", 0))
+        failure_events = {
+            failure
+            for failure in (
+                sdk_event(self.sdk, "CLIENTEVENT_CON_LOST"),
+                sdk_event(self.sdk, "CLIENTEVENT_CON_FAILED"),
+                sdk_event(self.sdk, "CLIENTEVENT_CON_CRYPT_ERROR"),
+            )
+            if failure is not None
+        }
+        if event and event in failure_events:
+            self.connected = False
+            self.logged_in = False
+            self.channel_id = None
+            return True
+        return False
 
     def reconnect(self) -> bool:
         """Rebuild the native client and re-establish connection + login.
