@@ -343,6 +343,23 @@ def prompt_text(label: str, default: Optional[str] = None, *, secret: bool = Fal
     return default if value == "" and default is not None else value
 
 
+def comma_int(value: str) -> int:
+    """argparse type that accepts ``_`` and ``,`` thousands separators.
+
+    Lets users write ``--count 10,999`` or ``--count 1_000`` instead of being
+    rejected by ``type=int``.  ``-`` is preserved for negative inputs and
+    surrounding whitespace is tolerated; anything that is not an integer after
+    stripping separators raises ``argparse.ArgumentTypeError`` so argparse
+    prints its usual ``invalid int value`` message.
+    """
+
+    cleaned = value.strip().replace("_", "").replace(",", "")
+    try:
+        return int(cleaned)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from exc
+
+
 def prompt_int(
     label: str,
     default: int,

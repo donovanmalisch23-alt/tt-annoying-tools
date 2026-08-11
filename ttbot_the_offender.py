@@ -20,6 +20,7 @@ from tt_teamtalk import (
     TeamTalkError,
     TeamTalkSession,
     add_connection_arguments,
+    comma_int,
     config_from_args,
     message_fields,
     print_tool_error,
@@ -69,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-responses",
-        type=int,
+        type=comma_int,
         default=100,
         help="responses before exit; 0 means unlimited with --confirm",
     )

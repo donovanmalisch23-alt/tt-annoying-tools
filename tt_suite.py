@@ -24,6 +24,7 @@ from tt_teamtalk import (
     TeamTalkError,
     TeamTalkSession,
     add_connection_arguments,
+    comma_int,
     config_dir,
     config_from_args,
     print_tool_error,
@@ -176,19 +177,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--message-count",
-        type=int,
+        type=comma_int,
         default=DEFAULT_MESSAGE_COUNT,
         help=f"messages per selected target, any positive integer (default: {DEFAULT_MESSAGE_COUNT})",
     )
     parser.add_argument(
         "--login-cycles",
-        type=int,
+        type=comma_int,
         default=DEFAULT_LOGIN_CYCLES,
         help="additional login/logout cycles; zero skips the explicit cycle phase",
     )
     parser.add_argument(
         "--join-leave-cycles",
-        type=int,
+        type=comma_int,
         default=DEFAULT_JOIN_LEAVE_CYCLES,
         help="join/leave cycles per selected channel; zero skips channel cycling",
     )
@@ -201,14 +202,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--churn-bots",
-        type=int,
+        type=comma_int,
         default=0,
         help="number of extra login/logout churn bots to spawn concurrently; "
         "any non-negative integer (requires --concurrent)",
     )
     parser.add_argument(
         "--churn-cycles",
-        type=int,
+        type=comma_int,
         default=5,
         help="login/logout cycles per churn bot; any positive integer",
     )

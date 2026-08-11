@@ -20,6 +20,7 @@ from tt_teamtalk import (
     TeamTalkError,
     TeamTalkSession,
     add_connection_arguments,
+    comma_int,
     config_from_args,
     print_tool_error,
     prompt_connection_config,
@@ -72,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--count",
-        type=int,
+        type=comma_int,
         default=DEFAULT_COUNT,
         help=f"number of sends, any positive integer (default: {DEFAULT_COUNT})",
     )

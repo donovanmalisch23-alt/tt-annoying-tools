@@ -20,6 +20,7 @@ from tt_teamtalk import (
     TeamTalkError,
     TeamTalkSession,
     add_connection_arguments,
+    comma_int,
     config_from_args,
     print_tool_error,
     prompt_connection_config,
@@ -42,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_connection_arguments(parser)
     parser.add_argument(
         "--cycles",
-        type=int,
+        type=comma_int,
         default=DEFAULT_CYCLES,
         help=f"leave/join cycles, any positive integer (default: {DEFAULT_CYCLES})",
     )

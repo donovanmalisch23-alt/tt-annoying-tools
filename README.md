@@ -179,9 +179,11 @@ python3 tt_suite.py --concurrent \
 There is no built-in ceiling on how many bots, messages, or cycles you request
 — `--churn-bots`, `--message-count`, and `--churn-cycles` accept any positive
 integer, so the practical limit is your server's own max-user setting and what
-your test machine can sustain. The discovery connection and every bot still go
-through `whitelist.txt` + `--confirm` + `--dry-run`. Without `--concurrent` the
-suite keeps its original sequential single-session behavior.
+your test machine can sustain. Integer count arguments accept ``_`` and ``,``
+thousands separators, so `--churn-bots 10,999` and `--churn-bots 10999` are
+equivalent. The discovery connection and every bot still go through
+`whitelist.txt` + `--confirm` + `--dry-run`. Without `--concurrent` the suite
+keeps its original sequential single-session behavior.
 
 With `--all-users` (or `--user-id all`) the user-bot runs in **continuous
 mode**: instead of messaging a fixed list once, it keeps re-discovering the
