@@ -181,8 +181,11 @@ def _find_sdk_python() -> Optional[Path]:
         )
 
     here = Path(__file__).resolve().parent
-    # Vendored SDK shipped with this project (sdk/TeamTalk5.py).
-    candidates.insert(0, here / "sdk" / "TeamTalk5.py")
+    # Vendored SDK shipped with this project (sdk/TeamTalk5.py).  This is a
+    # low-priority fallback so an explicit TEAMTALK_SDK_PATH (used by the CI
+    # build, which downloads the per-platform SDK) takes precedence -- that
+    # keeps the Windows build from bundling the vendored Linux libTeamTalk5.so.
+    candidates.append(here / "sdk" / "TeamTalk5.py")
     candidates.extend((here / "TeamTalk5.py", here / "TeamTalkPy" / "TeamTalk5.py"))
 
     for candidate in candidates:
@@ -332,10 +335,40 @@ def _vendored_license_path() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _sdk_license_accepted_marker() -> Path:
-    """Marker file recording that the user accepted the SDK license."""
+def _sdk_license_accepted_markers() -> list[Path]:
+    """Candidate marker files recording that the user accepted the SDK license.
 
-    return config_dir() / _SDK_LICENSE_MARKER
+    The preferred location is next to the tools (``config_dir()``), but on
+    Windows that may be a non-writable folder (e.g. Program Files), so the
+    user's home directory is offered as a fallback so acceptance still
+    persists.
+    """
+
+    markers = [config_dir() / _SDK_LICENSE_MARKER]
+    try:
+        home = Path.home()
+    except (RuntimeError, OSError):
+        home = None
+    if home is not None and home not in {m.parent for m in markers}:
+        markers.append(home / ("." + _SDK_LICENSE_MARKER))
+    return markers
+
+
+def _sdk_license_accepted_marker() -> Path:
+    """Primary marker file (kept for backwards compatibility with callers)."""
+
+    return _sdk_license_accepted_markers()[0]
+
+
+def _write_sdk_license_marker(markers: list[Path], text: str) -> None:
+    """Persist license acceptance to the first writable marker location."""
+
+    for marker in markers:
+        try:
+            marker.write_text(text, encoding="utf-8")
+            return
+        except OSError:
+            continue
 
 
 def _sdk_license_decision() -> Optional[bool]:
@@ -387,29 +420,26 @@ def ensure_sdk_license_accepted(*, pre_choice: Optional[bool] = None) -> None:
         pre_choice = _sdk_license_decision()
 
     if pre_choice is False:
-        marker = _sdk_license_accepted_marker()
-        if marker.is_file():
-            try:
-                marker.unlink()
-            except OSError:
-                pass
+        for marker in _sdk_license_accepted_markers():
+            if marker.is_file():
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
         raise TeamTalkConfigurationError(
             "TeamTalk 5 SDK license terms declined. The SDK will not be used. "
             "Re-run and accept the terms (Y) to continue, or remove the SDK."
         )
 
-    marker = _sdk_license_accepted_marker()
-    if marker.is_file():
+    markers = _sdk_license_accepted_markers()
+    if any(m.is_file() for m in markers):
         return  # already accepted on a previous run
 
     if pre_choice is True:
-        try:
-            marker.write_text(
-                "accepted via TT_ACCEPT_SDK_LICENSE / --accept-sdk-license\n",
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+        _write_sdk_license_marker(
+            markers,
+            "accepted via TT_ACCEPT_SDK_LICENSE / --accept-sdk-license\n",
+        )
         return
 
     # Interactive first-run prompt.
@@ -425,10 +455,7 @@ def ensure_sdk_license_accepted(*, pre_choice: Optional[bool] = None) -> None:
         except EOFError:
             answer = ""
         if answer in {"y", "yes"}:
-            try:
-                marker.write_text("accepted\n", encoding="utf-8")
-            except OSError:
-                pass
+            _write_sdk_license_marker(markers, "accepted\n")
             print("[license] TeamTalk 5 SDK license terms accepted.")
             return
         if answer in {"n", "no"}:

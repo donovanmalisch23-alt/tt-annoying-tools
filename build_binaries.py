@@ -103,6 +103,17 @@ def main() -> int:
         "--add-data",
         f"{sdk_library}{sep}TeamTalk_DLL",
     ]
+    # Bundle the SDK License.txt into sdk/ so the first-run license gate in a
+    # frozen build can print the full terms (it looks for <meipass>/sdk/License.txt).
+    license_file = here / "sdk" / "License.txt"
+    if not license_file.is_file():
+        # Fall back to the License.txt shipped next to the discovered SDK.
+        for candidate in (sdk_python.parent.parent.parent / "License.txt",):
+            if candidate.is_file():
+                license_file = candidate
+                break
+    if license_file.is_file():
+        common += ["--add-data", f"{license_file}{sep}sdk"]
 
     for name, script in TOOLS.items():
         cmd = common + ["--name", name, str(here / script)]

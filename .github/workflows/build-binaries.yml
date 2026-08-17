@@ -1,19 +1,28 @@
 name: Build binaries
 
 # Build standalone Windows (.exe) and Linux executables for the TeamTalk
-# tools with PyInstaller.  The TeamTalk 5 SDK is downloaded per platform and
-# bundled into each executable so the result runs without a separate SDK
-# install.  The public SDK is a 30-day trial; a licensed SDK is needed for a
-# permanent build (swap the SDK URLs below to the Pro edition if required).
+# tools with PyInstaller, then publish them to the GitHub Releases tab.
+#
+# The TeamTalk 5 SDK is downloaded per platform and bundled into each
+# executable so the result runs without a separate SDK install.  The public
+# SDK is a 30-day trial; a licensed SDK is needed for a permanent build (swap
+# the SDK URLs below to the Pro edition if required).
+#
+# Releases:
+#   * push to main / workflow_dispatch  -> refresh a rolling "latest" release
+#   * push of a v* tag                   -> a versioned release for that tag
 
 on:
   workflow_dispatch:
   push:
+    # A push to main refreshes the rolling "latest" release; pushing a v* tag
+    # creates a versioned release.  (branches + tags both under one push key:
+    # the workflow runs when either matches.)
     branches: [main]
-    paths:
-      - '**.py'
-      - 'build_binaries.py'
-      - '.github/workflows/build-binaries.yml'
+    tags: ['v*']
+
+permissions:
+  contents: write   # required to create releases / tags
 
 jobs:
   build:
@@ -23,11 +32,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
-            sdk_url: https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z
             artifact: tt-linux-x86_64
+            sdk_urls: |
+              https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z
+              https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_ubuntu22_x86_64.7z
           - os: windows-latest
-            sdk_url: https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.7z
             artifact: tt-windows-x64
+            sdk_urls: |
+              https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.7z
+              https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.7z
+              https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.zip
+              https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win32.7z
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -47,21 +62,37 @@ jobs:
       - name: Download and extract TeamTalk SDK
         shell: bash
         run: |
-          curl -fsSL -o sdk.7z "$SDK_URL"
-          7z x sdk.7z -osdk -y
+          set -e
+          downloaded=0
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            echo "Trying SDK URL: $url"
+            if curl -fSL --connect-timeout 20 --retry 2 -o sdk_archive "$url"; then
+              downloaded=1
+              echo "Downloaded from: $url"
+              break
+            fi
+            echo "URL failed: $url"
+          done <<'URLS'
+          ${{ matrix.sdk_urls }}
+          URLS
+          if [ "$downloaded" != "1" ]; then
+            echo "ERROR: could not download the TeamTalk SDK from any candidate URL." >&2
+            exit 1
+          fi
+          # The archive may be .7z or .zip; 7z handles both.
+          7z x sdk_archive -osdk_ci -y
           echo "Extracted SDK tree:"
-          find sdk -maxdepth 3 | head -60
-        env:
-          SDK_URL: ${{ matrix.sdk_url }}
+          find sdk_ci -maxdepth 3 | head -60
 
       - name: Set TEAMTALK_SDK_PATH
         shell: bash
         run: |
           # Prefer the directory that contains the Library/ subtree (SDK root).
-          root="$(find sdk -type d -name Library -printf '%h\n' | head -1)"
+          root="$(find sdk_ci -type d -name Library -printf '%h\n' | head -1)"
           if [ -z "$root" ]; then
             # Fall back to the directory that contains TeamTalk5.py.
-            root="$(find sdk -name TeamTalk5.py -printf '%h\n' | head -1)"
+            root="$(find sdk_ci -name TeamTalk5.py -printf '%h\n' | head -1)"
           fi
           if [ -z "$root" ]; then
             echo "Could not locate the SDK root." >&2
@@ -73,10 +104,95 @@ jobs:
       - name: Build executables
         run: python build_binaries.py
 
+      - name: Package binaries
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            archive="release/${{ matrix.artifact }}.zip"
+            7z a -tzip "$archive" ./dist/*
+          else
+            archive="release/${{ matrix.artifact }}.tar.gz"
+            tar -czf "$archive" -C dist .
+          fi
+          echo "Packaged: $archive"
+          ls -la release
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*
+          path: release/*
           if-no-files-found: error
           retention-days: 90
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
+            echo "name=Latest build" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Inspect assets
+        shell: bash
+        run: |
+          set -e
+          echo "Downloaded assets:"
+          find assets -type f | sort
+          ls -la assets
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.name }}
+          body: |
+            ## TeamTalk Annoying Tools — ${{ steps.tag.outputs.name }}
+
+            Standalone Windows and Linux executables built from
+            commit ${{ github.sha }}.
+
+            ### Windows (x64)
+            Download **`tt-windows-x64.zip`**, extract it, and run any of the
+            `.exe` tools (`tt-suite.exe`, `tt-spammer.exe`,
+            `tt-message-spammer.exe`, `tt-leave-join-spammer.exe`,
+            `ttbot-the-offender.exe`). Each bundles the TeamTalk 5 SDK, so no
+            separate SDK install is needed. On first run you will be prompted
+            to accept the TeamTalk 5 SDK license terms (Y/N).
+
+            ### Linux (x86_64)
+            Download **`tt-linux-x86_64.tar.gz`**, extract it, and run the
+            executables the same way.
+
+            ### SDK trial note
+            The bundled SDK runs in TRAIL MODE and self-disables after 30 days
+            of use. Re-download a fresh build (with a newer SDK) to reset the
+            window, or supply your own TeamTalk SDK license via
+            `TT_LICENSE_NAME` / `TT_LICENSE_KEY`.
+          files: assets/*
+          make_latest: ${{ steps.tag.outputs.make_latest }}
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
