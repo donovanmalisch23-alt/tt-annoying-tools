@@ -204,6 +204,32 @@ equivalent. The discovery connection and every bot still go through
 `whitelist.txt` + `--confirm` + `--dry-run`. Without `--concurrent` the suite
 keeps its original sequential single-session behavior.
 
+### One bot per channel / one bot per user
+
+`--bot-per-channel` and `--bot-per-user` (both require `--concurrent`) scale the
+concurrent mode out to one dedicated bot per target, each on its **own SDK
+connection**:
+
+- `--bot-per-channel` spawns one channel-bot per discovered/selected channel
+  (each joins and messages only its channel) instead of a single channel-bot
+  handling every channel.
+- `--bot-per-user` spawns one user-bot per selected user (each private-messages
+  only its assigned user) instead of a single user-bot messaging everyone. With
+  `--all-users` this snapshots the currently online users (one bot each); it
+  does **not** run the continuous new-joiner mode.
+
+```bash
+# One channel-bot per channel and one user-bot per user (3 users, 4 channels):
+python3 tt_suite.py --concurrent --bot-per-channel --bot-per-user   --all-channels --user-id 101,102,103   --channel-message 'channel test' --private-message 'private test'   --message-count 1 --join-leave-cycles 1 --confirm
+
+# Preview the per-target bot plan without sending:
+python3 tt_suite.py --dry-run --concurrent --bot-per-channel --bot-per-user   --all-channels --all-users --channel-message 'hi' --private-message 'hi'
+```
+
+There is no built-in ceiling on the number of per-target bots, so the practical
+limit is your server's max-user setting and what your test machine can sustain
+(each bot is a separate SDK connection and login).
+
 With `--all-users` (or `--user-id all`) the user-bot runs in **continuous
 mode**: instead of messaging a fixed list once, it keeps re-discovering the
 online users and messages every joiner it has not messaged yet, each receiving

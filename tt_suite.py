@@ -214,6 +214,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="login/logout cycles per churn bot; any positive integer",
     )
     parser.add_argument(
+        "--bot-per-channel",
+        action="store_true",
+        help="with --concurrent, spawn one bot per selected channel (each on "
+        "its own SDK connection) instead of a single channel-bot handling all "
+        "channels",
+    )
+    parser.add_argument(
+        "--bot-per-user",
+        action="store_true",
+        help="with --concurrent, spawn one bot per selected user (each on its "
+        "own SDK connection) that private-messages only that user, instead of a "
+        "single user-bot messaging everyone. With --all-users this snapshots the "
+        "currently online users (one bot each); it does not run the continuous "
+        "new-joiner mode",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=DEFAULT_INTERVAL,
@@ -289,6 +305,27 @@ def validate_args(args: argparse.Namespace) -> tuple[list[int], bool, bool]:
         raise TeamTalkConfigurationError(
             "--churn-bots requires --concurrent (each churn bot opens its own "
             "SDK connection)"
+        )
+    if args.bot_per_channel and not args.concurrent:
+        raise TeamTalkConfigurationError(
+            "--bot-per-channel requires --concurrent (each channel bot opens "
+            "its own SDK connection)"
+        )
+    if args.bot_per_user and not args.concurrent:
+        raise TeamTalkConfigurationError(
+            "--bot-per-user requires --concurrent (each user bot opens its own "
+            "SDK connection)"
+        )
+    if args.bot_per_channel and not (
+        args.channel_message is not None or args.join_leave_cycles > 0
+    ):
+        raise TeamTalkConfigurationError(
+            "--bot-per-channel requires a channel action (--channel-message or "
+            "--join-leave-cycles)"
+        )
+    if args.bot_per_user and args.private_message is None:
+        raise TeamTalkConfigurationError(
+            "--bot-per-user requires --private-message"
         )
     if args.concurrent:
         has_action = (
@@ -780,9 +817,18 @@ def _run_concurrent(
             "no online users matched the private-message selection"
         )
 
+    per_user = bool(getattr(args, "bot_per_user", False))
+    per_channel = bool(getattr(args, "bot_per_channel", False))
+
     plan_lines = ["Concurrent bot plan:"]
     if args.private_message is not None:
-        if all_users:
+        if per_user:
+            plan_lines.append(
+                f"  {len(selected_users)} user-bot(s): one bot per user, each "
+                f"sending {args.message_count} private message(s) to its user "
+                "on its own SDK connection."
+            )
+        elif all_users:
             plan_lines.append(
                 f"  1 user-bot (continuous): message every online user and any "
                 f"new joiner ({args.message_count} message(s) each, no repeats), "
@@ -794,7 +840,14 @@ def _run_concurrent(
                 f"{len(selected_users)} user(s)."
             )
     if channel_action:
-        plan_lines.append(f"  1 channel-bot: {len(selected_channels)} channel(s).")
+        if per_channel:
+            plan_lines.append(
+                f"  {len(selected_channels)} channel-bot(s): one bot per "
+                f"channel ({args.join_leave_cycles or 0} join/leave cycle(s), "
+                f"{args.message_count} channel message(s) each)."
+            )
+        else:
+            plan_lines.append(f"  1 channel-bot: {len(selected_channels)} channel(s).")
     if args.churn_bots > 0:
         plan_lines.append(
             f"  {args.churn_bots} churn-bot(s): {args.churn_cycles} "
@@ -809,41 +862,85 @@ def _run_concurrent(
     stop_event = threading.Event()
     threads: list[threading.Thread] = []
     if args.private_message is not None:
-        threads.append(
-            threading.Thread(
-                target=_user_bot,
-                args=(
-                    config,
-                    selected_users,
-                    all_users,
-                    args.private_message,
-                    args.message_count,
-                    args.interval,
-                    args.sweep_interval,
-                    stop_event,
-                ),
-                name="user-bot",
-                daemon=True,
+        if per_user:
+            # One bot per selected user: each opens its own SDK connection and
+            # private-messages only its assigned user.  --all-users snapshots the
+            # currently online users (selected_users); it does not run the
+            # continuous new-joiner mode.
+            for idx, user_id in enumerate(selected_users, start=1):
+                threads.append(
+                    threading.Thread(
+                        target=_user_bot,
+                        args=(
+                            config,
+                            [int(user_id)],
+                            False,  # finite single-user mode
+                            args.private_message,
+                            args.message_count,
+                            args.interval,
+                            args.sweep_interval,
+                            stop_event,
+                        ),
+                        name=f"user-bot-{idx}",
+                        daemon=True,
+                    )
+                )
+        else:
+            threads.append(
+                threading.Thread(
+                    target=_user_bot,
+                    args=(
+                        config,
+                        selected_users,
+                        all_users,
+                        args.private_message,
+                        args.message_count,
+                        args.interval,
+                        args.sweep_interval,
+                        stop_event,
+                    ),
+                    name="user-bot",
+                    daemon=True,
+                )
             )
-        )
     if channel_action:
-        threads.append(
-            threading.Thread(
-                target=_channel_bot,
-                args=(
-                    config,
-                    selected_channels,
-                    config.channel_password,
-                    args.channel_message,
-                    args.message_count,
-                    args.join_leave_cycles,
-                    args.interval,
-                    stop_event,
-                ),
-                name="channel-bot",
-                daemon=True,
+        if per_channel:
+            for idx, channel in enumerate(selected_channels, start=1):
+                threads.append(
+                    threading.Thread(
+                        target=_channel_bot,
+                        args=(
+                            config,
+                            [channel],
+                            config.channel_password,
+                            args.channel_message,
+                            args.message_count,
+                            args.join_leave_cycles,
+                            args.interval,
+                            stop_event,
+                        ),
+                        name=f"channel-bot-{idx}",
+                        daemon=True,
+                    )
+                )
+        else:
+            threads.append(
+                threading.Thread(
+                    target=_channel_bot,
+                    args=(
+                        config,
+                        selected_channels,
+                        config.channel_password,
+                        args.channel_message,
+                        args.message_count,
+                        args.join_leave_cycles,
+                        args.interval,
+                        stop_event,
+                    ),
+                    name="channel-bot",
+                    daemon=True,
+                )
             )
-        )
     for i in range(args.churn_bots):
         threads.append(
             threading.Thread(
@@ -1014,6 +1111,8 @@ def interactive_run() -> int:
     )
     churn_bots = 0
     churn_cycles = 5
+    bot_per_channel = False
+    bot_per_user = False
     if concurrent:
         churn_bots = prompt_int(
             "Number of login/logout churn bots", 0, minimum=0
@@ -1022,6 +1121,13 @@ def interactive_run() -> int:
             churn_cycles = prompt_int(
                 "Login/logout cycles per churn bot", 5, minimum=1
             )
+        bot_per_channel = prompt_yes_no(
+            "Spawn one bot per channel (own connection each)?", False
+        )
+        bot_per_user = prompt_yes_no(
+            "Spawn one bot per user for private messages (own connection each)?",
+            False,
+        )
     sweep_interval = 0.5
     if concurrent and all_users:
         sweep_interval = prompt_float(
@@ -1044,6 +1150,8 @@ def interactive_run() -> int:
         concurrent=concurrent,
         churn_bots=churn_bots,
         churn_cycles=churn_cycles,
+        bot_per_channel=bot_per_channel,
+        bot_per_user=bot_per_user,
         interval=interval,
         sweep_interval=sweep_interval,
         dry_run=False,
