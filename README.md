@@ -267,9 +267,12 @@ can trigger it — it is independent of the whitelist/allowlist, because it is a
 emergency stop. Channel messages are ignored, and the match is exact (a message
 like `SW now` does not trigger it).
 
-The shutdown is forced: a backstop thread hard-exits the process shortly after
-the switch fires, so a stuck loop cannot keep the tool alive; the tool loops
-also exit cleanly when they see it.
+The shutdown is a hard cut. A single background thread per connection drains the
+SDK event queue every 0.5s (set ``TT_KILL_SWITCH_SCAN_MS``) and is the sole
+``getMessage`` consumer, so the scan runs continuously regardless of what the bot
+is doing — including while it is idle or sleeping. The instant a matching
+private message is seen the process calls ``exit(0)`` immediately; it does not
+wait for the current operation to finish.
 
 Customize or disable it:
 

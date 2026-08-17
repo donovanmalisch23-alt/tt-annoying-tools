@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import collections
 import getpass
 import importlib
 import importlib.util
@@ -17,6 +18,7 @@ import os
 import sys
 import threading
 import time
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -475,6 +477,9 @@ def ensure_sdk_license_accepted(*, pre_choice: Optional[bool] = None) -> None:
 # trigger, independent of allowlists/whitelists.  A backstop thread forces
 # process exit shortly after the switch fires, so a stuck loop cannot keep the
 # tool alive; loops that poll for it also exit cleanly.
+_NO_EVENT = types.SimpleNamespace(nClientEvent=0)
+
+
 _KILL_SWITCH_EVENT = threading.Event()
 
 
@@ -946,6 +951,16 @@ class TeamTalkSession:
         self.rejoin_channel_id: Optional[int] = None
         self.rejoin_channel_password: str = ""
         self._closed = False
+        # Centralized event pump: a single background thread is the sole
+        # consumer of the SDK's getMessage() (the SDK is not safe to call from
+        # two threads at once).  It scans every event for the universal kill
+        # switch (hard-cut) and routes the rest through this buffer so the
+        # bot's poll()/_wait_for() can read them without racing the pump.
+        self._event_buffer: collections.deque = collections.deque()
+        self._event_cv = threading.Condition(threading.Lock())
+        self._pump_stop = threading.Event()
+        self._pump_thread: Optional[threading.Thread] = None
+        self._start_event_pump()
 
     def _load_configured_sdk(self) -> Any:
         # Hold the load lock across the env-var mutation + load + restore so
@@ -1018,11 +1033,9 @@ class TeamTalkSession:
 
         while time.monotonic() < deadline:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            try:
-                message = self.client.getMessage(nWaitMS=remaining_ms)
-            except TypeError:
-                message = self.client.getMessage(remaining_ms)
-            self._scan_for_kill_switch(message)
+            # Events are drained by the background pump thread (the sole
+            # getMessage consumer) and delivered through the internal buffer.
+            message = self._next_event(remaining_ms)
             if kill_switch_triggered():
                 raise TeamTalkError("kill switch triggered")
             event = sdk_int(getattr(message, "nClientEvent", 0))
@@ -1179,6 +1192,9 @@ class TeamTalkSession:
         rejoin does not undo a successful reconnect.  Returns True if online.
         """
 
+        # Stop the pump before we tear down the old client so it cannot call
+        # getMessage on a client we are about to release.
+        self._stop_event_pump()
         old = self.client
         try:
             old.closeTeamTalk()
@@ -1195,6 +1211,8 @@ class TeamTalkSession:
             self.client = self.sdk.TeamTalk()
         except Exception as exc:
             raise TeamTalkSDKError(f"failed to reinitialize TeamTalk: {exc}") from exc
+        # The native client was rebuilt, so (re)start the event pump for it.
+        self._start_event_pump()
         try:
             self._connect_and_login()
         except Exception as exc:
@@ -1277,12 +1295,17 @@ class TeamTalkSession:
         self._closed = True
         logout_error: Optional[Exception] = None
         if getattr(self, "client", None) is None:
+            self._stop_event_pump()
             return
+        # logout() needs the event pump running to receive the logout-success
+        # event, so keep it running through logout, then stop it before we
+        # disconnect/release the native client.
         if self.logged_in:
             try:
                 self.logout()
             except Exception as exc:
                 logout_error = exc
+        self._stop_event_pump()
         if self.connected:
             try:
                 self.client.disconnect()
@@ -1464,22 +1487,105 @@ class TeamTalkSession:
             raise TeamTalkConfigurationError("user ID cannot be negative")
         self.send_text(text, user_id=user_id)
 
-    def poll(self, wait_ms: int = 1000) -> Any:
+    # ----- centralized event pump + universal kill switch ----------------- #
+
+    def _start_event_pump(self) -> None:
+        """Start the single background thread that drains the SDK event queue.
+
+        The pump is the only consumer of ``getMessage`` so the SDK is never
+        called from two threads at once.  It scans every event for the
+        universal kill switch (hard cut) and pushes the rest into an internal
+        buffer consumed by ``poll`` / ``_wait_for``.
+        """
+
+        if self._pump_thread is not None and self._pump_thread.is_alive():
+            return
+        self._pump_stop.clear()
+        # Drain any stale buffered events from a previous client lifetime.
+        with self._event_cv:
+            self._event_buffer.clear()
+        thread = threading.Thread(
+            target=self._event_pump_loop, name="tt-event-pump", daemon=True
+        )
+        self._pump_thread = thread
+        thread.start()
+
+    def _stop_event_pump(self) -> None:
+        """Signal the pump thread to stop and wait briefly for it to exit."""
+
+        self._pump_stop.set()
+        # Nudge the pump out of a blocking getMessage and the buffer waiters.
+        with self._event_cv:
+            self._event_cv.notify_all()
+        thread = self._pump_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._pump_thread = None
+
+    def _event_pump_loop(self) -> None:
+        """Background loop: drain SDK events, scan for the kill switch, buffer."""
+
+        interval_ms = 500
         try:
-            message = self.client.getMessage(nWaitMS=wait_ms)
-        except TypeError:
-            message = self.client.getMessage(wait_ms)
-        self._scan_for_kill_switch(message)
-        return message
+            interval_env = int(float(os.environ.get("TT_KILL_SWITCH_SCAN_MS") or 500))
+            if interval_env > 0:
+                interval_ms = interval_env
+        except ValueError:
+            pass
+        while not self._pump_stop.is_set() and not kill_switch_triggered():
+            client = getattr(self, "client", None)
+            if client is None:
+                time.sleep(0.05)
+                continue
+            try:
+                message = client.getMessage(nWaitMS=interval_ms)
+            except TypeError:
+                try:
+                    message = client.getMessage(interval_ms)
+                except Exception:
+                    time.sleep(0.05)
+                    continue
+            except Exception:
+                time.sleep(0.05)
+                continue
+            if message is None:
+                continue
+            # Hard cut: scan every event for the kill phrase BEFORE buffering.
+            self._scan_for_kill_switch(message)
+            if kill_switch_triggered():
+                # Force immediate exit (0). Do not return to the main loop.
+                os._exit(0)
+            event = sdk_int(getattr(message, "nClientEvent", 0))
+            if event:  # ignore CLIENTEVENT_NONE (0) padding from the wait
+                with self._event_cv:
+                    self._event_buffer.append(message)
+                    self._event_cv.notify()
+
+    def _next_event(self, timeout_ms: int) -> Any:
+        """Pop one buffered event, waiting up to ``timeout_ms`` for one."""
+
+        deadline = time.monotonic() + max(0.0, timeout_ms) / 1000.0
+        with self._event_cv:
+            while not self._event_buffer and time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if not self._event_cv.wait(timeout=max(0.001, remaining)):
+                    break
+            if self._event_buffer:
+                return self._event_buffer.popleft()
+        # No event: return a CLIENTEVENT_NONE placeholder the callers already
+        # treat as "no event" (they check nClientEvent != 0).
+        return _NO_EVENT
+
+    def poll(self, wait_ms: int = 1000) -> Any:
+        return self._next_event(wait_ms)
 
     def _scan_for_kill_switch(self, message: Any) -> None:
         """Fire the universal kill switch on a matching private message.
 
-        Scans every event pulled from the SDK queue (here via ``poll`` and in
-        ``_wait_for``) for a user-to-user text message whose body is the kill
-        phrase.  Channel messages are ignored.  Any connected user can trigger
-        it; it is independent of the whitelist/allowlist because it is an
-        emergency stop.
+        Scans an SDK event for a user-to-user text message whose body is the
+        kill phrase (default ``SW``, exact match, case-insensitive).  Channel
+        messages are ignored.  Any connected user can trigger it; it is
+        independent of the whitelist/allowlist because it is an emergency stop.
         """
 
         if not self.config.kill_switch or kill_switch_triggered():
