@@ -465,6 +465,69 @@ def ensure_sdk_license_accepted(*, pre_choice: Optional[bool] = None) -> None:
         print("Please answer Y or N.")
 
 
+# --------------------------------------------------------------------------- #
+# Universal kill switch
+# --------------------------------------------------------------------------- #
+#
+# When any tool receives a private (user-to-user) TeamTalk text message whose
+# body equals the configured kill phrase (default "SW", case-insensitive), the
+# tool shuts down completely.  This is an emergency stop any connected user can
+# trigger, independent of allowlists/whitelists.  A backstop thread forces
+# process exit shortly after the switch fires, so a stuck loop cannot keep the
+# tool alive; loops that poll for it also exit cleanly.
+_KILL_SWITCH_EVENT = threading.Event()
+
+
+def kill_switch_phrase() -> str:
+    """The text that, received as a private message, triggers shutdown."""
+
+    return (os.environ.get("TT_KILL_SWITCH_PHRASE") or "SW").strip() or "SW"
+
+
+def _kill_switch_env_enabled() -> bool:
+    value = os.environ.get("TT_KILL_SWITCH")
+    if value is None:
+        return True
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def kill_switch_triggered() -> bool:
+    """Return True once the universal kill switch has fired."""
+
+    return _KILL_SWITCH_EVENT.is_set()
+
+
+def _matches_kill_phrase(text: str) -> bool:
+    phrase = kill_switch_phrase().casefold()
+    body = (text or "").strip().casefold()
+    return bool(phrase) and body == phrase
+
+
+def trigger_kill_switch(reason: str) -> None:
+    """Fire the universal kill switch and force the tool to shut down.
+
+    Idempotent: only the first caller acts.  Sets the global event so polling
+    loops can exit, prints a clear shutdown line, then starts a daemon backstop
+    thread that hard-exits the process a moment later so a blocked loop cannot
+    keep the tool running.
+    """
+
+    if _KILL_SWITCH_EVENT.is_set():
+        return
+    _KILL_SWITCH_EVENT.set()
+    try:
+        backstop = float(os.environ.get("TT_KILL_SWITCH_BACKSTOP") or "2.0")
+    except ValueError:
+        backstop = 2.0
+    print(f"[kill-switch] {reason} -- shutting down now.", flush=True)
+
+    def _force_exit() -> None:
+        time.sleep(max(0.0, backstop))
+        os._exit(0)
+
+    threading.Thread(target=_force_exit, name="kill-switch-backstop", daemon=True).start()
+
+
 @dataclass(frozen=True)
 class ConnectionConfig:
     host: str
@@ -487,6 +550,7 @@ class ConnectionConfig:
     license_name: Optional[str] = None
     license_key: str = ""
     accept_sdk_license: Optional[bool] = None
+    kill_switch: bool = True
 
 
 def prompt_text(label: str, default: Optional[str] = None, *, secret: bool = False) -> str:
@@ -635,6 +699,10 @@ def prompt_connection_config(*, channel_required: bool) -> ConnectionConfig:
             secret=True,
         )
 
+    kill_switch = prompt_yes_no(
+        "Enable the universal kill switch (shut down on a private 'SW' message)?",
+        _env_bool("TT_KILL_SWITCH", True),
+    )
     return ConnectionConfig(
         host=host,
         tcp_port=tcp_port,
@@ -653,6 +721,7 @@ def prompt_connection_config(*, channel_required: bool) -> ConnectionConfig:
         sdk_library=os.environ.get("TEAMTALK_SDK_LIBRARY") or os.environ.get("TEAMTALK_LIBRARY"),
         license_name=os.environ.get("TT_LICENSE_NAME"),
         license_key=os.environ.get("TT_LICENSE_KEY") or "",
+        kill_switch=kill_switch,
     )
 
 
@@ -788,6 +857,24 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="decline the TeamTalk 5 SDK license terms (or set "
         "TT_ACCEPT_SDK_LICENSE=0). Prevents the SDK from being used.",
     )
+    parser.add_argument(
+        "--kill-switch",
+        dest="kill_switch",
+        action="store_const",
+        const=True,
+        default=_env_bool("TT_KILL_SWITCH", True),
+        help="completely shut down the tool when a private message containing "
+        "the kill phrase is received (default: on). The phrase defaults to 'SW' "
+        "(set TT_KILL_SWITCH_PHRASE); any connected user can trigger it.",
+    )
+    parser.add_argument(
+        "--no-kill-switch",
+        dest="kill_switch",
+        action="store_const",
+        const=False,
+        help="disable the universal SW private-message kill switch "
+        "(or set TT_KILL_SWITCH=0).",
+    )
 
 
 def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
@@ -834,6 +921,7 @@ def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
         license_name=args.license_name,
         license_key=args.license_key or "",
         accept_sdk_license=args.accept_sdk_license,
+        kill_switch=args.kill_switch,
     )
 
 
@@ -934,6 +1022,9 @@ class TeamTalkSession:
                 message = self.client.getMessage(nWaitMS=remaining_ms)
             except TypeError:
                 message = self.client.getMessage(remaining_ms)
+            self._scan_for_kill_switch(message)
+            if kill_switch_triggered():
+                raise TeamTalkError("kill switch triggered")
             event = sdk_int(getattr(message, "nClientEvent", 0))
             if event in expected:
                 if event == command_success and command_id is not None:
@@ -1375,9 +1466,43 @@ class TeamTalkSession:
 
     def poll(self, wait_ms: int = 1000) -> Any:
         try:
-            return self.client.getMessage(nWaitMS=wait_ms)
+            message = self.client.getMessage(nWaitMS=wait_ms)
         except TypeError:
-            return self.client.getMessage(wait_ms)
+            message = self.client.getMessage(wait_ms)
+        self._scan_for_kill_switch(message)
+        return message
+
+    def _scan_for_kill_switch(self, message: Any) -> None:
+        """Fire the universal kill switch on a matching private message.
+
+        Scans every event pulled from the SDK queue (here via ``poll`` and in
+        ``_wait_for``) for a user-to-user text message whose body is the kill
+        phrase.  Channel messages are ignored.  Any connected user can trigger
+        it; it is independent of the whitelist/allowlist because it is an
+        emergency stop.
+        """
+
+        if not self.config.kill_switch or kill_switch_triggered():
+            return
+        if message is None:
+            return
+        event = sdk_int(getattr(message, "nClientEvent", 0))
+        text_event = sdk_event(self.sdk, "CLIENTEVENT_CMD_USER_TEXTMSG")
+        if text_event is None or event != text_event:
+            return
+        text_message = getattr(message, "textmessage", None)
+        if text_message is None:
+            return
+        fields = message_fields(text_message)
+        msgtype_user = getattr(getattr(self.sdk, "TextMsgType", object()), "MSGTYPE_USER", None)
+        if msgtype_user is None or fields["type"] != sdk_int(msgtype_user):
+            return
+        if _matches_kill_phrase(fields["text"]):
+            trigger_kill_switch(
+                f"kill phrase {kill_switch_phrase()!r} received in a private "
+                f"message from {fields['from_username']!r} "
+                f"(user {fields['from_user_id']})"
+            )
 
 
 def message_fields(message: Any) -> dict[str, Any]:

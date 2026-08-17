@@ -27,6 +27,7 @@ from tt_teamtalk import (
     comma_int,
     config_dir,
     config_from_args,
+    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
@@ -406,6 +407,9 @@ def run_login_logout_cycles(
     """Run login/logout cycles.  Returns False if a kick could not be recovered."""
 
     for index in range(cycles):
+        if kill_switch_triggered():
+            print("[kill-switch] stopping login/logout cycles.")
+            return False
         try:
             if not session.logged_in:
                 session.login()
@@ -437,6 +441,9 @@ def run_channel_operations(
         return
 
     for channel in channels:
+        if kill_switch_triggered():
+            print("[kill-switch] stopping channel operations.")
+            return
         channel_id = int(channel["id"])
         channel_name = str(channel.get("path") or channel.get("name") or channel_id)
         password_required = bool(channel.get("password_required"))
@@ -481,6 +488,9 @@ def run_private_operations(
     """Send private messages.  Returns False if a kick could not be recovered."""
 
     for message_index in range(message_count):
+        if kill_switch_triggered():
+            print("[kill-switch] stopping private operations.")
+            return False
         for recipient_index, user_id in enumerate(user_ids, start=1):
             try:
                 session.send_private_message(message, int(user_id))
@@ -861,6 +871,20 @@ def _run_concurrent(
 
     stop_event = threading.Event()
     threads: list[threading.Thread] = []
+
+    # A watcher that propagates the universal kill switch to the per-bot
+    # stop_event so all concurrent bots exit promptly when SW is received.
+    def _kill_switch_watcher() -> None:
+        while not stop_event.is_set():
+            if kill_switch_triggered():
+                stop_event.set()
+                return
+            stop_event.wait(0.25)
+    threads.append(
+        threading.Thread(target=_kill_switch_watcher, name="kill-switch-watcher",
+                          daemon=True)
+    )
+
     if args.private_message is not None:
         if per_user:
             # One bot per selected user: each opens its own SDK connection and

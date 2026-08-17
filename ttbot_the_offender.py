@@ -22,6 +22,7 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
+    kill_switch_triggered,
     message_fields,
     print_tool_error,
     sdk_event,
@@ -148,6 +149,9 @@ def run(args: argparse.Namespace, config=None) -> int:
         )
 
         while args.max_responses == 0 or response_count < args.max_responses:
+            if kill_switch_triggered():
+                print("[kill-switch] stopping response bot.")
+                return 130
             message = session.poll(1000)
             # Catch a server kick the moment the CON_LOST/CON_FAILED event is
             # dequeued, instead of relying on the getMyUserID() watchdog below.

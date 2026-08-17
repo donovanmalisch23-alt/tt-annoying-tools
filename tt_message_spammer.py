@@ -22,6 +22,7 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
+    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
@@ -381,6 +382,9 @@ def send_messages_on_session(
         except TeamTalkError:
             pass
     for index in range(count):
+        if kill_switch_triggered():
+            print("[kill-switch] stopping message test.")
+            return 130
         try:
             if target == "private":
                 for recipient_index, recipient_id in enumerate(recipient_ids, start=1):

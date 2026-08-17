@@ -22,6 +22,7 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
+    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
@@ -90,6 +91,9 @@ def run_cycles(*, config, cycles: int, interval: float, wait: float) -> int:
             session.rejoin_channel_id = config.channel_id
             session.rejoin_channel_password = config.channel_password
         for index in range(cycles):
+            if kill_switch_triggered():
+                print("[kill-switch] stopping leave/join test.")
+                return 130
             try:
                 current_channel = session.current_channel_id()
                 session.leave_channel()

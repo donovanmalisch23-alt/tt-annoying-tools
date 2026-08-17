@@ -258,6 +258,33 @@ Continuous mode only changes the user-bot. The `--channel-message` bot and any
 `--churn-bots` still terminate after their finite counts as usual, so the run
 ends when you interrupt the user-bot and those bots have finished.
 
+### Universal kill switch (all tools)
+
+Every tool monitors the SDK event queue for an emergency stop: if it receives a
+**private (user-to-user) message whose body is `SW`** (case-insensitive, after
+stripping whitespace), the tool **shuts down completely**. Any connected user
+can trigger it — it is independent of the whitelist/allowlist, because it is an
+emergency stop. Channel messages are ignored, and the match is exact (a message
+like `SW now` does not trigger it).
+
+The shutdown is forced: a backstop thread hard-exits the process shortly after
+the switch fires, so a stuck loop cannot keep the tool alive; the tool loops
+also exit cleanly when they see it.
+
+Customize or disable it:
+
+```bash
+# default on, phrase "SW":
+python3 tt_suite.py --concurrent --all-users --private-message 'hi' --confirm
+
+# custom phrase via env:
+TT_KILL_SWITCH_PHRASE=STOP python3 tt_spammer.py --cycles 1000 --confirm
+
+# disable the kill switch:
+python3 tt_suite.py --concurrent --no-kill-switch --private-message 'hi' --confirm
+# or: TT_KILL_SWITCH=0
+```
+
 ### Kick resistance (all tools)
 
 Every tool reconnects and resumes after a kick or disconnect. When a bot loses
