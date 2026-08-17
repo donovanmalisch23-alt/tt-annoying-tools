@@ -41,8 +41,11 @@ jobs:
             sdk_urls: |
               https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.7z
               https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.7z
-              https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.zip
               https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win32.7z
+              https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win32.7z
+              https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.zip
+              https://bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win64.zip
+              https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_win32.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +67,10 @@ jobs:
         run: |
           set -e
           downloaded=0
-          while IFS= read -r url; do
+          # Default IFS read trims the leading whitespace that the YAML
+          # block-scalar indentation bakes into each candidate URL.
+          while read -r url; do
+            url="${url%"${url##*[![:space:]]}"}"   # strip trailing whitespace
             [ -z "$url" ] && continue
             echo "Trying SDK URL: $url"
             if curl -fSL --connect-timeout 20 --retry 2 -o sdk_archive "$url"; then
@@ -164,35 +170,86 @@ jobs:
           ls -la assets
 
       - name: Create / update release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.name }}
-          body: |
-            ## TeamTalk Annoying Tools — ${{ steps.tag.outputs.name }}
-
-            Standalone Windows and Linux executables built from
-            commit ${{ github.sha }}.
-
-            ### Windows (x64)
-            Download **`tt-windows-x64.zip`**, extract it, and run any of the
-            `.exe` tools (`tt-suite.exe`, `tt-spammer.exe`,
-            `tt-message-spammer.exe`, `tt-leave-join-spammer.exe`,
-            `ttbot-the-offender.exe`). Each bundles the TeamTalk 5 SDK, so no
-            separate SDK install is needed. On first run you will be prompted
-            to accept the TeamTalk 5 SDK license terms (Y/N).
-
-            ### Linux (x86_64)
-            Download **`tt-linux-x86_64.tar.gz`**, extract it, and run the
-            executables the same way.
-
-            ### SDK trial note
-            The bundled SDK runs in TRAIL MODE and self-disables after 30 days
-            of use. Re-download a fresh build (with a newer SDK) to reset the
-            window, or supply your own TeamTalk SDK license via
-            `TT_LICENSE_NAME` / `TT_LICENSE_KEY`.
-          files: assets/*
-          make_latest: ${{ steps.tag.outputs.make_latest }}
-          prerelease: false
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"; NAME="$TAG"
+          else
+            TAG="latest"; NAME="Latest build"
+          fi
+
+          # Build the release notes (commit SHA expanded in the echo lines; the
+          # backtick-heavy body is in a quoted heredoc so nothing is re-evaluated).
+          {
+            echo "## TeamTalk Annoying Tools — $NAME"
+            echo ""
+            echo "Standalone Windows and Linux executables built from commit $GITHUB_SHA."
+            echo ""
+            cat <<'NOTES'
+          ### Windows (x64)
+          Download **`tt-windows-x64.zip`**, extract it, and run any of the
+          `.exe` tools (`tt-suite.exe`, `tt-spammer.exe`, `tt-message-spammer.exe`,
+          `tt-leave-join-spammer.exe`, `ttbot-the-offender.exe`). Each bundles the
+          TeamTalk 5 SDK, so no separate SDK install is needed. On first run you
+          will be prompted to accept the TeamTalk 5 SDK license terms (Y/N).
+
+          ### Linux (x86_64)
+          Download **`tt-linux-x86_64.tar.gz`**, extract it, and run the
+          executables the same way.
+
+          ### SDK trial note
+          The bundled SDK runs in TRAIL MODE and self-disables after 30 days of
+          use. Re-download a fresh build (with a newer SDK) to reset the window,
+          or supply your own TeamTalk SDK license via `TT_LICENSE_NAME` /
+          `TT_LICENSE_KEY`.
+          NOTES
+          } > /tmp/notes.md
+
+          # Retry helper: outlasts transient GitHub Releases-API 503s
+          # ("No server is currently available to service your request").
+          retry() {
+            local attempts="$1" delay="$2"; shift 2
+            local i
+            for i in $(seq 1 "$attempts"); do
+              if "$@"; then return 0; fi
+              echo "::warning::Attempt $i/$attempts failed; retrying in ${delay}s..." >&2
+              [ "$i" -lt "$attempts" ] && sleep "$delay"
+            done
+            return 1
+          }
+
+          # Best-effort: clear an existing rolling release (including drafts) so
+          # we create fresh.  `gh release delete` by tag skips drafts, so look
+          # the release up by ID via the API first.
+          EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"                        --jq '.id' 2>/dev/null || true)"
+          if [ -z "$EXISTING" ]; then
+            EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/releases"                          --jq "[.[] | select(.tag_name==\"$TAG\")] | first | .id // empty" 2>/dev/null || true)"
+          fi
+          if [ -n "$EXISTING" ]; then
+            echo "Removing existing release (id=$EXISTING) for tag $TAG"
+            retry 5 10 gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$EXISTING" || true
+            retry 5 10 git push "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" \
+                   ":refs/tags/$TAG" 2>/dev/null || true
+          fi
+
+          # Create the published release, retrying through transient 5xx.
+          if ! retry 10 20 gh release create "$TAG" \
+                  --title "$NAME" --latest --target "$GITHUB_SHA" \
+                  --notes-file /tmp/notes.md; then
+            echo "::error::Could not create release $TAG after retries" >&2
+            exit 1
+          fi
+
+          # Upload each asset independently with retries.
+          shopt -s nullglob
+          fail=0
+          for asset in assets/*; do
+            if ! retry 10 15 gh release upload "$TAG" "$asset" --clobber; then
+              echo "::error::Failed to upload $asset after retries" >&2
+              fail=1
+            fi
+          done
+          exit "$fail"
