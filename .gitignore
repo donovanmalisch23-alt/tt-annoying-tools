@@ -7,6 +7,9 @@ __pycache__/
 teamtalk.env
 whitelist.txt
 
+# Per-user first-run SDK license acceptance marker.
+.tt-sdk-license-accepted
+
 # Local development environments.
 .venv/
 venv/

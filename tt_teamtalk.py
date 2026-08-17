@@ -181,6 +181,8 @@ def _find_sdk_python() -> Optional[Path]:
         )
 
     here = Path(__file__).resolve().parent
+    # Vendored SDK shipped with this project (sdk/TeamTalk5.py).
+    candidates.insert(0, here / "sdk" / "TeamTalk5.py")
     candidates.extend((here / "TeamTalk5.py", here / "TeamTalkPy" / "TeamTalk5.py"))
 
     for candidate in candidates:
@@ -207,6 +209,8 @@ def _find_sdk_library(sdk_python: Optional[Path]) -> Optional[Path]:
     dirs: list[Path] = []
     for root in _sdk_roots():
         dirs.extend((root / "Library" / "TeamTalk_DLL", root))
+    here = Path(__file__).resolve().parent
+    dirs.append(here / "sdk")
     if sdk_python is not None:
         dirs.extend((sdk_python.parent, sdk_python.parent.parent / "TeamTalk_DLL"))
 
@@ -306,6 +310,134 @@ def load_teamtalk_sdk() -> Any:
             ) from exc
 
 
+# --------------------------------------------------------------------------- #
+# First-run TeamTalk 5 SDK license acceptance
+# --------------------------------------------------------------------------- #
+#
+# The TeamTalk 5 SDK License.txt states that use of the SDK files is not
+# permitted until the user has read and agreed to the license terms.  This
+# gate enforces that on the first run: it prints the bundled license text (or a
+# reference to it), prompts Y/N, and persists the decision in a marker file so
+# subsequent runs skip the prompt.  ``TT_ACCEPT_SDK_LICENSE=1`` and the
+# ``--accept-sdk-license`` flag pre-approve (for scripted / CI runs), and
+# ``--decline-sdk-license`` / ``TT_ACCEPT_SDK_LICENSE=0`` explicitly decline.
+_SDK_LICENSE_MARKER = ".tt-sdk-license-accepted"
+
+
+def _vendored_license_path() -> Optional[Path]:
+    """Path to the bundled TeamTalk 5 SDK ``License.txt``, if present."""
+
+    here = Path(__file__).resolve().parent
+    candidate = here / "sdk" / "License.txt"
+    return candidate if candidate.is_file() else None
+
+
+def _sdk_license_accepted_marker() -> Path:
+    """Marker file recording that the user accepted the SDK license."""
+
+    return config_dir() / _SDK_LICENSE_MARKER
+
+
+def _sdk_license_decision() -> Optional[bool]:
+    """Return an explicit pre-made decision from env vars, else ``None``."""
+
+    value = os.environ.get("TT_ACCEPT_SDK_LICENSE")
+    if value is None:
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _print_sdk_license_terms() -> None:
+    """Print the TeamTalk 5 SDK license terms to the console."""
+
+    license_path = _vendored_license_path()
+    if license_path is not None:
+        try:
+            text = license_path.read_text(encoding="utf-8", errors="replace")
+            bar = "=" * 78
+            print(bar)
+            print("TEAMTALK 5 SDK LICENSE AGREEMENT")
+            print(bar)
+            print(text)
+            print(bar)
+            return
+        except OSError:
+            pass
+    # Fallback summary if the bundled file is unavailable.
+    print(
+        "Use of the TeamTalk 5 SDK is not permitted until you have read and "
+        "agreed to the TeamTalk 5 SDK License Agreement from BearWare.dk. See "
+        f"{TEAMTALK_SDK_DOWNLOAD} for the full terms."
+    )
+
+
+def ensure_sdk_license_accepted(*, pre_choice: Optional[bool] = None) -> None:
+    """Prompt for (or honour a stored) acceptance of the SDK license.
+
+    On the first run this prints the license terms and asks the user to agree
+    (Y/N).  A ``Y`` answer persists the decision so later runs skip the prompt.
+    An ``N`` answer (or an explicit decline) raises ``TeamTalkConfigurationError``
+    and prevents the SDK from being used.  ``pre_choice`` lets a caller pass the
+    parsed ``--accept-sdk-license`` / ``--decline-sdk-license`` decision so the
+    flag works even when there is no interactive terminal (e.g. CI).
+    """
+
+    # Explicit flag / env decision always wins and is persisted either way.
+    if pre_choice is None:
+        pre_choice = _sdk_license_decision()
+
+    if pre_choice is False:
+        marker = _sdk_license_accepted_marker()
+        if marker.is_file():
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+        raise TeamTalkConfigurationError(
+            "TeamTalk 5 SDK license terms declined. The SDK will not be used. "
+            "Re-run and accept the terms (Y) to continue, or remove the SDK."
+        )
+
+    marker = _sdk_license_accepted_marker()
+    if marker.is_file():
+        return  # already accepted on a previous run
+
+    if pre_choice is True:
+        try:
+            marker.write_text(
+                "accepted via TT_ACCEPT_SDK_LICENSE / --accept-sdk-license\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return
+
+    # Interactive first-run prompt.
+    _print_sdk_license_terms()
+    print(
+        "\nBy using the TeamTalk 5 SDK you agree to be bound by the terms and "
+        "conditions stated above. Do you accept the binding terms of the "
+        "TTSDK license? (Y/N)"
+    )
+    while True:
+        try:
+            answer = input("> ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer in {"y", "yes"}:
+            try:
+                marker.write_text("accepted\n", encoding="utf-8")
+            except OSError:
+                pass
+            print("[license] TeamTalk 5 SDK license terms accepted.")
+            return
+        if answer in {"n", "no"}:
+            raise TeamTalkConfigurationError(
+                "TeamTalk 5 SDK license terms declined. The SDK will not be used."
+            )
+        print("Please answer Y or N.")
+
+
 @dataclass(frozen=True)
 class ConnectionConfig:
     host: str
@@ -327,6 +459,7 @@ class ConnectionConfig:
     sdk_library: Optional[str] = None
     license_name: Optional[str] = None
     license_key: str = ""
+    accept_sdk_license: Optional[bool] = None
 
 
 def prompt_text(label: str, default: Optional[str] = None, *, secret: bool = False) -> str:
@@ -611,6 +744,23 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="TeamTalk SDK license key (or set TT_LICENSE_KEY). "
         "Use a password manager or env var; avoid passing keys on the command line.",
     )
+    parser.add_argument(
+        "--accept-sdk-license",
+        dest="accept_sdk_license",
+        action="store_const",
+        const=True,
+        default=None,
+        help="accept the TeamTalk 5 SDK license terms without prompting "
+        "(or set TT_ACCEPT_SDK_LICENSE=1). Skips the first-run Y/N prompt.",
+    )
+    parser.add_argument(
+        "--decline-sdk-license",
+        dest="accept_sdk_license",
+        action="store_const",
+        const=False,
+        help="decline the TeamTalk 5 SDK license terms (or set "
+        "TT_ACCEPT_SDK_LICENSE=0). Prevents the SDK from being used.",
+    )
 
 
 def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
@@ -656,6 +806,7 @@ def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
         sdk_library=args.sdk_library,
         license_name=args.license_name,
         license_key=args.license_key or "",
+        accept_sdk_license=args.accept_sdk_license,
     )
 
 
@@ -664,6 +815,11 @@ class TeamTalkSession:
 
     def __init__(self, config: ConnectionConfig, sdk: Any = None):
         self.config = config
+        # Enforce the TeamTalk 5 SDK license acceptance before any SDK file is
+        # loaded/used.  A pre-supplied sdk (already-loaded module) skips the
+        # import path but the license gate still runs first, because using the
+        # SDK at all requires acceptance of its terms.
+        ensure_sdk_license_accepted(pre_choice=config.accept_sdk_license)
         self.sdk = sdk or self._load_configured_sdk()
         try:
             self.client = self.sdk.TeamTalk()

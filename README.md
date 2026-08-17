@@ -12,13 +12,32 @@ trigger-based benign reply bot instead.
 
 ## Install the SDK
 
-Download the Linux TeamTalk 5 SDK from [BearWare.dk's SDK download page](https://bearware.dk/?page_id=419).
-The SDK includes the `TeamTalk5.py` Python interface and the native Linux
-library. The low-level API is documented in the [TeamTalk C-API reference](https://www.bearware.dk/teamtalksdk/v5.22a/docs/C-API/).
+This repository **bundles the TeamTalk 5 SDK** under `sdk/`
+(`TeamTalk5.py`, `libTeamTalk5.so`, and the upstream `License.txt`), so the
+tools work out of the box without a separate SDK download. You can still
+point at your own SDK build with `TEAMTALK_SDK_PYTHON` / `TEAMTALK_SDK_LIBRARY`
+or `--sdk-python` / `--sdk-library`. The low-level API is documented in the
+[TeamTalk C-API reference](https://www.bearware.dk/teamtalksdk/v5.22a/docs/C-API/).
 
-This checkout reads SDK and connection settings from a local `teamtalk.env`
-file, which is intentionally ignored by Git because it contains credentials
-and machine-specific paths. Copy `teamtalk.env.example` to `teamtalk.env`,
+### First-run license acceptance
+
+The TeamTalk 5 SDK `License.txt` states that use of the SDK is not permitted
+until you have read and agreed to its terms. On the **first run** of any tool
+the SDK is used, the tool prints the bundled license text and prompts:
+
+```
+Do you accept the binding terms of the TTSDK license? (Y/N)
+```
+
+Answer `Y` to continue; the decision is saved in `.tt-sdk-license-accepted`
+next to the tools so later runs skip the prompt. Answer `N` (or pass
+`--decline-sdk-license` / `TT_ACCEPT_SDK_LICENSE=0`) to refuse — the SDK will
+not be loaded. For scripted / CI runs, pre-approve with
+`--accept-sdk-license` or `TT_ACCEPT_SDK_LICENSE=1`.
+
+This checkout reads connection settings from a local `teamtalk.env`
+file, which is intentionally ignored by Git because it can contain
+credentials. Copy `teamtalk.env.example` to `teamtalk.env`,
 then edit it or set the variables manually. Exported variables override the
 local file.
 
@@ -35,7 +54,7 @@ command-line options. For a nonstandard SDK layout, use
 /path/to/libTeamTalk5.so`.
 
 The SDK itself may require a valid TeamTalk SDK license/trial according to its
-license terms. No native SDK binaries are bundled in this repository.
+license terms. The TeamTalk 5 SDK files are bundled under `sdk/` (see above).
 
 ## Building standalone binaries
 
