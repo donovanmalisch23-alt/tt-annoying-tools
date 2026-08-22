@@ -121,6 +121,13 @@ def render_response(template: str, data: dict[str, object]) -> str:
         raise TeamTalkConfigurationError(
             f"unsupported response placeholder {exc}; use username, user_id, or message"
         ) from exc
+    except ValueError as exc:
+        # str.format raises ValueError for malformed templates (e.g. an
+        # unmatched "{"); surface it as a configuration error instead of an
+        # unhandled traceback.
+        raise TeamTalkConfigurationError(
+            f"invalid response template: {exc}"
+        ) from exc
     if not response:
         raise TeamTalkConfigurationError("rendered response cannot be empty")
     return response

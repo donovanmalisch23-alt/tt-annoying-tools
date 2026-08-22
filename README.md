@@ -195,14 +195,26 @@ python3 tt_suite.py --concurrent \
   --message-count 2 --churn-bots 3 --churn-cycles 10 --interval 0.1 --confirm
 ```
 
-There is no built-in ceiling on how many bots, messages, or cycles you request
-— `--churn-bots`, `--message-count`, and `--churn-cycles` accept any positive
-integer, so the practical limit is your server's own max-user setting and what
-your test machine can sustain. Integer count arguments accept ``_`` and ``,``
-thousands separators, so `--churn-bots 10,999` and `--churn-bots 10999` are
-equivalent. The discovery connection and every bot still go through
-`whitelist.txt` + `--confirm` + `--dry-run`. Without `--concurrent` the suite
-keeps its original sequential single-session behavior.
+`--churn-bots`, `--message-count`, and `--churn-cycles` accept any positive
+integer, so the practical limit on messages and cycles is your server's own
+max-user setting and what your test machine can sustain. Integer count
+arguments accept ``_`` and ``,`` thousands separators, so `--churn-bots 10,999`
+and `--churn-bots 10999` are equivalent. The discovery connection and every bot
+still go through `whitelist.txt` + `--confirm` + `--dry-run`. Without
+`--concurrent` the suite keeps its original sequential single-session behavior.
+
+There **is** a per-process ceiling on the number of *concurrent* bots, because
+each bot opens its own SDK connection and the native library drives each one
+with a `select()` reactor that cannot address file descriptors at or above
+`FD_SETSIZE` (1024). The suite computes the safe maximum from the process's
+file-descriptor limit (roughly `(1024 − 16) / 4 ≈ 252` bots on a typical Linux
+box). When you ask for more than that, the suite **splits the bots across
+multiple worker processes** — each running up to the ceiling — and supervises
+them from the parent, so a request for 1000 churn-bots becomes four workers of
+~252 bots each instead of a core dump. The universal kill switch still stops
+every worker: the moment any bot receives the emergency-stop phrase, the parent
+terminates all of them. Raising the process's descriptor limit (`ulimit -n`)
+raises the per-worker ceiling and therefore reduces the number of workers.
 
 ### One bot per channel / one bot per user
 
@@ -226,9 +238,10 @@ python3 tt_suite.py --concurrent --bot-per-channel --bot-per-user   --all-channe
 python3 tt_suite.py --dry-run --concurrent --bot-per-channel --bot-per-user   --all-channels --all-users --channel-message 'hi' --private-message 'hi'
 ```
 
-There is no built-in ceiling on the number of per-target bots, so the practical
-limit is your server's max-user setting and what your test machine can sustain
-(each bot is a separate SDK connection and login).
+The number of per-target bots is bounded by the same file-descriptor ceiling as
+`--churn-bots` (each bot is a separate SDK connection and login); the suite
+refuses to start if the total concurrent bot count would exhaust the native
+library's `select()` reactor (see the concurrent-mode note above).
 
 With `--all-users` (or `--user-id all`) the user-bot runs in **continuous
 mode**: instead of messaging a fixed list once, it keeps re-discovering the
@@ -303,6 +316,12 @@ kick within the delay. Turn it off with `--no-kick-resistance` (or
 # churn bot that reconnects after every kick, 2 s between checks:
 python3 tt_spammer.py --cycles 1000 --interval 0.1 --reconnect-delay 2 --confirm
 ```
+
+After releasing the SDK client, every tool waits `TT_SHUTDOWN_SETTLE_SECONDS`
+seconds (default `1.0`) before the process exits. The native library tears
+down its internal threads asynchronously, and exiting immediately could
+segfault the process while they were still winding down. Set the variable to
+`0` to skip the wait if you do not need it.
 
 The combined runner reads an exact, one-host-per-line allowlist from
 `whitelist.txt` before it connects. Copy `whitelist.txt.example` to

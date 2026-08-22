@@ -11,6 +11,7 @@ is attempted.
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import os
 import sys
 import threading
@@ -19,7 +20,14 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows has no resource module
+    resource = None  # type: ignore[assignment]
+
 from tt_teamtalk import (
+    sdk_int,
+    sdk_text,
     TeamTalkConfigurationError,
     TeamTalkError,
     TeamTalkSession,
@@ -591,6 +599,80 @@ def _drain_events(
     return False
 
 
+def _drain_login_events(
+    session: TeamTalkSession,
+    stop_event: threading.Event,
+    window_s: float,
+) -> bool:
+    """Drain queued roster events after login before selecting targets."""
+
+    if stop_event.wait(0.25):
+        return False
+
+    deadline = time.monotonic() + window_s
+    while time.monotonic() < deadline and not stop_event.is_set():
+        wait_ms = max(1, int((deadline - time.monotonic()) * 1000))
+        message = session.poll(wait_ms)
+        if not sdk_int(getattr(message, "nClientEvent", 0)):
+            break
+        if session.is_connection_failure(message):
+            return True
+    return False
+
+
+def _channel_roster(
+    session: TeamTalkSession,
+) -> dict[int, list[dict[str, Any]]]:
+    """Build a fallback roster from every visible channel."""
+
+    roster: dict[int, list[dict[str, Any]]] = {}
+    own_user_id = sdk_int(session.client.getMyUserID(), -1)
+    for channel in session.list_channels():
+        channel_id = int(channel["id"])
+        try:
+            members = session.client.getChannelUsers(channel_id)
+        except Exception:
+            continue
+        users: list[dict[str, Any]] = []
+        for member in members:
+            user_id = sdk_int(getattr(member, "nUserID", -1), -1)
+            if user_id < 0 or user_id == own_user_id:
+                continue
+            nickname = sdk_text(getattr(member, "szNickname", ""))
+            username = sdk_text(getattr(member, "szUsername", ""))
+            users.append(
+                {
+                    "id": user_id,
+                    "nickname": nickname,
+                    "username": username,
+                    "channel_id": channel_id,
+                    "channel_path": str(channel.get("path") or ""),
+                    "display_name": nickname or username or f"user {user_id}",
+                }
+            )
+        if users:
+            roster[channel_id] = sorted(
+                users, key=lambda item: (item["display_name"].casefold(), item["id"])
+            )
+    return roster
+
+
+def _merge_channel_roster(
+    users: Sequence[dict[str, Any]],
+    roster: dict[int, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Combine server and per-channel rosters without duplicate IDs."""
+
+    merged: dict[int, dict[str, Any]] = {int(user["id"]): user for user in users}
+    for channel_users in roster.values():
+        for user in channel_users:
+            merged.setdefault(int(user["id"]), user)
+    return sorted(
+        merged.values(),
+        key=lambda item: (str(item["display_name"]).casefold(), int(item["id"])),
+    )
+
+
 def _user_bot(
     base_config: Any,
     user_ids: Sequence[int],
@@ -632,6 +714,9 @@ def _user_bot(
     messaged: set[int] = set()
     sweep_interval = max(0.05, float(sweep_interval))
     with TeamTalkSession(config) as session:
+        if _drain_login_events(session, stop_event, sweep_interval):
+            print("[user-bot] bot lost its connection.")
+            return
         print(
             f"[user-bot] watching for users; checking every {sweep_interval:g}s. "
             "Press Ctrl+C to stop."
@@ -649,7 +734,10 @@ def _user_bot(
                     return
                 continue
             try:
-                users = session.list_users(include_self=False)
+                users = _merge_channel_roster(
+                    session.list_users(include_self=False),
+                    _channel_roster(session),
+                )
             except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
                 print(f"[user-bot] discovery interrupted: {exc}")
                 if not session.check_and_reconnect():
@@ -784,6 +872,125 @@ def _churn_bot(
                 return
 
 
+# A "job" is a picklable description of one bot's work, tagged by kind so a
+# worker (thread or process) can reconstruct the right bot call.  The
+# ``stop_event`` is deliberately not part of the job: each worker creates its
+# own local event, so jobs stay picklable across process boundaries.
+#
+#   ("user", user_ids, all_users, message, count, interval, sweep_interval)
+#   ("channel", channels, channel_password, channel_message, count,
+#               join_leave_cycles, interval)
+#   ("churn", index, total, cycles, interval)
+def _spawn_bot_thread(
+    config: Any,
+    job: tuple[Any, ...],
+    stop_event: threading.Event,
+) -> threading.Thread:
+    """Build a daemon thread that runs one bot job against ``config``."""
+
+    kind = job[0]
+    if kind == "user":
+        _, user_ids, all_users, message, count, interval, sweep_interval = job
+        return threading.Thread(
+            target=_user_bot,
+            args=(
+                config, user_ids, all_users, message, count, interval,
+                sweep_interval, stop_event,
+            ),
+            daemon=True,
+        )
+    if kind == "channel":
+        _, channels, channel_password, channel_message, count, cycles, interval = job
+        return threading.Thread(
+            target=_channel_bot,
+            args=(
+                config, channels, channel_password, channel_message, count,
+                cycles, interval, stop_event,
+            ),
+            daemon=True,
+        )
+    if kind == "churn":
+        _, index, total, cycles, interval = job
+        return threading.Thread(
+            target=_churn_bot,
+            args=(config, index, total, cycles, interval, stop_event),
+            daemon=True,
+        )
+    raise TeamTalkConfigurationError(f"unknown bot job kind: {kind!r}")
+
+
+def _worker_process(
+    config: Any,
+    jobs: Sequence[tuple[Any, ...]],
+    kill_event: Any,
+    worker_index: int,
+    worker_count: int,
+) -> None:
+    """Run one chunk of bot jobs in threads inside a child process.
+
+    Each worker process stays under the native library's FD_SETSIZE ceiling by
+    running at most ``_max_concurrent_bots()`` bots.  A local kill-switch
+    watcher mirrors the process-local kill switch into the shared
+    ``kill_event`` so the parent can stop every other worker the moment any
+    bot receives the emergency-stop phrase.
+    """
+
+    # Line-buffer stdout so concurrent workers do not interleave mid-line.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
+    print(f"[worker {worker_index}/{worker_count}] running {len(jobs)} bot(s).", flush=True)
+
+    stop_event = threading.Event()
+    threads = [_spawn_bot_thread(config, job, stop_event) for job in jobs]
+
+    def _watcher() -> None:
+        while not stop_event.is_set():
+            if kill_switch_triggered():
+                kill_event.set()
+                stop_event.set()
+                return
+            stop_event.wait(0.25)
+
+    threading.Thread(target=_watcher, name="kill-switch-watcher", daemon=True).start()
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
+def _max_concurrent_bots() -> int:
+    """Upper bound on simultaneous SDK connections this process can sustain.
+
+    The TeamTalk native library drives each client with an ACE select()
+    reactor, which cannot address file descriptors at or above FD_SETSIZE
+    (1024).  Each SDK connection needs a socket plus a notification pipe
+    (two FDs) and a little headroom, so the ceiling is roughly
+    (1024 - baseline) / fds_per_bot.  Exceeding it does not fail cleanly:
+    the reactor's notification pipe fails to open and the process aborts
+    (observed as "bit out of range 0 - FD_SETSIZE on fd_set" + SIGABRT).
+    """
+    ceiling = 1024  # FD_SETSIZE in the native ACE select reactor
+    if resource is not None:
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            # Raise the soft limit up to the select() address space so the
+            # process can actually use the descriptors it is allowed to open.
+            target = min(hard, ceiling)
+            if soft < target:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+                soft = target
+            ceiling = min(soft, ceiling)
+        except (OSError, ValueError):
+            pass
+    baseline = 16  # stdin/stdout/stderr + interpreter + margin
+    fds_per_bot = 4  # TCP socket + UDP socket + notification pipe (2 FDs)
+    return max(1, (ceiling - baseline) // fds_per_bot)
+
+
 def _run_concurrent(
     config: Any,
     args: argparse.Namespace,
@@ -796,7 +1003,13 @@ def _run_concurrent(
     discovery_config = replace(config, channel_id=None, channel_path=None)
     with TeamTalkSession(discovery_config) as session:
         channels = session.list_channels()
-        users = session.list_users()
+        deadline = time.monotonic() + 2.0
+        users = []
+        while time.monotonic() < deadline:
+            users = session.list_users()
+            if users:
+                break
+            time.sleep(0.05)
     print_discovery(channels, users)
 
     selected_users = (
@@ -869,131 +1082,168 @@ def _run_concurrent(
         print("Dry run complete; no bots were spawned, nothing was sent.")
         return 0
 
-    stop_event = threading.Event()
-    threads: list[threading.Thread] = []
-
-    # A watcher that propagates the universal kill switch to the per-bot
-    # stop_event so all concurrent bots exit promptly when SW is received.
-    def _kill_switch_watcher() -> None:
-        while not stop_event.is_set():
-            if kill_switch_triggered():
-                stop_event.set()
-                return
-            stop_event.wait(0.25)
-    threads.append(
-        threading.Thread(target=_kill_switch_watcher, name="kill-switch-watcher",
-                          daemon=True)
-    )
-
+    # Every bot opens its own SDK connection, and each connection consumes
+    # several file descriptors.  The native library's select() reactor cannot
+    # address FDs at or above FD_SETSIZE (1024), so requesting more bots than
+    # the process can sustain aborts with a core dump instead of a clean error.
+    # Refuse up front with a clear message rather than crashing mid-run.
+    # Build the list of bot jobs, then run them either as threads in this
+    # process (when the count fits under the FD_SETSIZE ceiling) or across
+    # multiple worker processes (when it would not).
+    jobs: list[tuple[Any, ...]] = []
     if args.private_message is not None:
         if per_user:
             # One bot per selected user: each opens its own SDK connection and
             # private-messages only its assigned user.  --all-users snapshots the
             # currently online users (selected_users); it does not run the
             # continuous new-joiner mode.
-            for idx, user_id in enumerate(selected_users, start=1):
-                threads.append(
-                    threading.Thread(
-                        target=_user_bot,
-                        args=(
-                            config,
-                            [int(user_id)],
-                            False,  # finite single-user mode
-                            args.private_message,
-                            args.message_count,
-                            args.interval,
-                            args.sweep_interval,
-                            stop_event,
-                        ),
-                        name=f"user-bot-{idx}",
-                        daemon=True,
-                    )
-                )
-        else:
-            threads.append(
-                threading.Thread(
-                    target=_user_bot,
-                    args=(
-                        config,
-                        selected_users,
-                        all_users,
+            for user_id in selected_users:
+                jobs.append(
+                    (
+                        "user",
+                        [int(user_id)],
+                        False,  # finite single-user mode
                         args.private_message,
                         args.message_count,
                         args.interval,
                         args.sweep_interval,
-                        stop_event,
-                    ),
-                    name="user-bot",
-                    daemon=True,
+                    )
+                )
+        else:
+            jobs.append(
+                (
+                    "user",
+                    selected_users,
+                    all_users,
+                    args.private_message,
+                    args.message_count,
+                    args.interval,
+                    args.sweep_interval,
                 )
             )
     if channel_action:
         if per_channel:
-            for idx, channel in enumerate(selected_channels, start=1):
-                threads.append(
-                    threading.Thread(
-                        target=_channel_bot,
-                        args=(
-                            config,
-                            [channel],
-                            config.channel_password,
-                            args.channel_message,
-                            args.message_count,
-                            args.join_leave_cycles,
-                            args.interval,
-                            stop_event,
-                        ),
-                        name=f"channel-bot-{idx}",
-                        daemon=True,
-                    )
-                )
-        else:
-            threads.append(
-                threading.Thread(
-                    target=_channel_bot,
-                    args=(
-                        config,
-                        selected_channels,
+            for channel in selected_channels:
+                jobs.append(
+                    (
+                        "channel",
+                        [channel],
                         config.channel_password,
                         args.channel_message,
                         args.message_count,
                         args.join_leave_cycles,
                         args.interval,
-                        stop_event,
-                    ),
-                    name="channel-bot",
-                    daemon=True,
+                    )
+                )
+        else:
+            jobs.append(
+                (
+                    "channel",
+                    selected_channels,
+                    config.channel_password,
+                    args.channel_message,
+                    args.message_count,
+                    args.join_leave_cycles,
+                    args.interval,
                 )
             )
     for i in range(args.churn_bots):
-        threads.append(
-            threading.Thread(
-                target=_churn_bot,
-                args=(
-                    config,
-                    i + 1,
-                    args.churn_bots,
-                    args.churn_cycles,
-                    args.interval,
-                    stop_event,
-                ),
-                name=f"churn-bot-{i + 1}",
-                daemon=True,
-            )
+        jobs.append(
+            ("churn", i + 1, args.churn_bots, args.churn_cycles, args.interval)
         )
 
-    for thread in threads:
-        thread.start()
+    total_bots = len(jobs)
+    max_bots = _max_concurrent_bots()
+
+    if total_bots <= max_bots:
+        # Everything fits in one process: run the bots as threads here.
+        stop_event = threading.Event()
+        threads = [_spawn_bot_thread(config, job, stop_event) for job in jobs]
+
+        # A watcher that propagates the universal kill switch to the per-bot
+        # stop_event so all concurrent bots exit promptly when SW is received.
+        # It runs for the whole run and is deliberately not joined: it only exits
+        # once stop_event is set, and in a finite run nothing else sets it, so
+        # joining it would hang the suite after the bots finish.
+        def _kill_switch_watcher() -> None:
+            while not stop_event.is_set():
+                if kill_switch_triggered():
+                    stop_event.set()
+                    return
+                stop_event.wait(0.25)
+        watcher = threading.Thread(
+            target=_kill_switch_watcher, name="kill-switch-watcher", daemon=True
+        )
+        watcher.start()
+
+        for thread in threads:
+            thread.start()
+        try:
+            for thread in threads:
+                thread.join()
+        except KeyboardInterrupt:
+            print("\nInterrupted: signalling bots to stop...")
+            stop_event.set()
+            for thread in threads:
+                thread.join(timeout=5.0)
+            print("Stopped.")
+            return 130
+        stop_event.set()  # let the kill-switch watcher exit
+        print("Finished concurrent TeamTalk suite.")
+        return 0
+
+    # Too many bots for one process: split the jobs into chunks that each fit
+    # under the FD_SETSIZE ceiling and run each chunk in its own worker
+    # process.  The parent supervises the workers and stops them all the moment
+    # any bot triggers the kill switch.
+    chunks = [jobs[i:i + max_bots] for i in range(0, len(jobs), max_bots)]
+    print(
+        f"Splitting {total_bots} bots across {len(chunks)} worker process(es) "
+        f"(up to {max_bots} each)."
+    )
+
+    kill_event = multiprocessing.Event()
+    processes: list[multiprocessing.Process] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        process = multiprocessing.Process(
+            target=_worker_process,
+            args=(config, chunk, kill_event, idx, len(chunks)),
+            name=f"tt-suite-worker-{idx}",
+            daemon=True,
+        )
+        processes.append(process)
+        process.start()
+
+    # Stop every worker as soon as the kill switch fires in any of them.
+    def _kill_monitor() -> None:
+        kill_event.wait()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+    monitor = threading.Thread(target=_kill_monitor, name="kill-monitor", daemon=True)
+    monitor.start()
+
     try:
-        for thread in threads:
-            thread.join()
+        for process in processes:
+            process.join()
     except KeyboardInterrupt:
-        print("\nInterrupted: signalling bots to stop...")
-        stop_event.set()
-        for thread in threads:
-            thread.join(timeout=5.0)
+        print("\nInterrupted: terminating workers...")
+        for process in processes:
+            process.terminate()
+        for process in processes:
+            process.join(timeout=5.0)
         print("Stopped.")
         return 130
+
+    if kill_event.is_set():
+        print("[kill-switch] shutting down all workers.")
+        return 0
+
+    for process in processes:
+        if process.exitcode not in (0, None):
+            print(f"worker {process.name} exited with code {process.exitcode}.")
+            return process.exitcode or 1
+
     print("Finished concurrent TeamTalk suite.")
     return 0
 
@@ -1010,7 +1260,13 @@ def execute(config: Any, args: argparse.Namespace) -> int:
     session_config = replace(config, channel_id=None, channel_path=None)
     with TeamTalkSession(session_config) as session:
         channels = session.list_channels()
-        users = session.list_users()
+        deadline = time.monotonic() + 2.0
+        users = []
+        while time.monotonic() < deadline:
+            users = session.list_users()
+            if users:
+                break
+            time.sleep(0.05)
         print_discovery(channels, users)
 
         selected_users = (
@@ -1205,4 +1461,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     raise SystemExit(main())

@@ -108,6 +108,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to ``default`` on any bad value."""
+
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def config_dir() -> Path:
     """Directory for user-facing config files (whitelist.txt, teamtalk.env).
 
@@ -720,7 +732,7 @@ def prompt_connection_config(*, channel_required: bool) -> ConnectionConfig:
         channel_id=channel_id,
         channel_path=channel_path,
         channel_password=channel_password,
-        command_timeout=float(os.environ.get("TT_COMMAND_TIMEOUT", "15")),
+        command_timeout=_env_float("TT_COMMAND_TIMEOUT", 15.0),
         sdk_path=os.environ.get("TEAMTALK_SDK_PATH"),
         sdk_python=os.environ.get("TEAMTALK_SDK_PYTHON"),
         sdk_library=os.environ.get("TEAMTALK_SDK_LIBRARY") or os.environ.get("TEAMTALK_LIBRARY"),
@@ -794,7 +806,7 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.environ.get("TT_COMMAND_TIMEOUT", "15")),
+        default=_env_float("TT_COMMAND_TIMEOUT", 15.0),
         help="seconds to wait for an SDK event (default: 15)",
     )
     parser.add_argument(
@@ -814,7 +826,7 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reconnect-delay",
         type=float,
-        default=float(os.environ.get("TT_RECONNECT_DELAY", "3.5")),
+        default=_env_float("TT_RECONNECT_DELAY", 3.5),
         help="seconds to wait before checking online status and reconnecting "
         "after a kick (default: 3.5)",
     )
@@ -1024,12 +1036,15 @@ class TeamTalkSession:
         command_id: Optional[int] = None,
     ) -> Any:
         expected = {sdk_int(event) for event in expected_events}
+        processing_event = sdk_event(self.sdk, "CLIENTEVENT_CMD_PROCESSING")
         deadline = time.monotonic() + self.config.command_timeout
         command_success = sdk_event(self.sdk, "CLIENTEVENT_CMD_SUCCESS")
         command_error = sdk_event(self.sdk, "CLIENTEVENT_CMD_ERROR")
         connection_lost = sdk_event(self.sdk, "CLIENTEVENT_CON_LOST")
         connection_failed = sdk_event(self.sdk, "CLIENTEVENT_CON_FAILED")
         crypt_error = sdk_event(self.sdk, "CLIENTEVENT_CON_CRYPT_ERROR")
+        result = None
+        command_complete = command_id is None
 
         while time.monotonic() < deadline:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
@@ -1039,12 +1054,22 @@ class TeamTalkSession:
             if kill_switch_triggered():
                 raise TeamTalkError("kill switch triggered")
             event = sdk_int(getattr(message, "nClientEvent", 0))
-            if event in expected:
-                if event == command_success and command_id is not None:
-                    source = sdk_int(getattr(message, "nSource", -1), -1)
-                    if source != command_id:
-                        continue
+            source = sdk_int(getattr(message, "nSource", -1), -1)
+            if event in expected and (command_id is None or source == command_id):
                 return message
+            if event == command_success and source == command_id:
+                result = message
+
+            if (
+                not command_complete
+                and processing_event is not None
+                and event == processing_event
+                and source == command_id
+                and not sdk_int(getattr(message, "bActive", 0))
+            ):
+                command_complete = True
+                if result is not None:
+                    return result
             failure_events = {
                 failure
                 for failure in (connection_lost, connection_failed, crypt_error)
@@ -1055,10 +1080,10 @@ class TeamTalkSession:
                 self.logged_in = False
                 self.channel_id = None
                 raise TeamTalkError(f"{action} failed: {self._error_text(message) or 'connection event'}")
-            if event == command_error:
-                source = sdk_int(getattr(message, "nSource", -1), -1)
-                if command_id is None or source == command_id:
-                    raise TeamTalkError(f"{action} failed: {self._error_text(message)}")
+            if event == command_error and (command_id is None or source == command_id):
+                raise TeamTalkError(f"{action} failed: {self._error_text(message)}")
+        if result is not None:
+            return result
         raise TeamTalkError(f"timed out waiting for {action} after {self.config.command_timeout:g}s")
 
     def _check_command(self, command_id: Any, action: str) -> int:
@@ -1224,12 +1249,46 @@ class TeamTalkSession:
             print(f"[kick-resistance] could not rejoin channel: {exc}")
         return self.is_online()
 
+    def _working_channel_target(self) -> Optional[int]:
+        """The channel ID this session should be in, or None if none is set."""
+
+        if self.rejoin_channel_id is not None:
+            return self.rejoin_channel_id
+        if self.config.channel_id is not None:
+            return self.config.channel_id
+        if self.config.channel_path:
+            try:
+                channel_id = sdk_int(
+                    self.client.getChannelIDFromPath(
+                        sdk_string(self.sdk, self.config.channel_path)
+                    ),
+                    -1,
+                )
+                return channel_id if channel_id > 0 else None
+            except Exception:
+                return None
+        return None
+
+    def _in_working_channel(self) -> bool:
+        """Return True if the client is in its configured working channel."""
+
+        target = self._working_channel_target()
+        if target is None:
+            return True  # no working channel configured
+        try:
+            return sdk_int(self.client.getMyChannelID(), -1) == target
+        except Exception:
+            return True
+
     def check_and_reconnect(self) -> bool:
         """Wait the reconnect delay, then reconnect if still offline.
 
         Implements kick resistance: after a suspected kick the bot waits
         ``reconnect_delay`` seconds, checks whether it is still online, and
-        if not rebuilds the connection so the caller can resume.  When kick
+        if not rebuilds the connection so the caller can resume.  A client
+        that is still online but was kicked out of its working channel
+        (TeamTalk moves a kicked user to the root channel, so the online
+        probe alone cannot see it) is rejoined to that channel.  When kick
         resistance is disabled this only reports the current online status
         without reconnecting, so the caller can stop cleanly.
         """
@@ -1237,6 +1296,12 @@ class TeamTalkSession:
         if self.config.reconnect_delay > 0:
             time.sleep(self.config.reconnect_delay)
         if self.is_online():
+            if not self._in_working_channel():
+                print("[kick-resistance] not in the working channel; rejoining.")
+                try:
+                    self._rejoin_working_channel()
+                except Exception as exc:
+                    print(f"[kick-resistance] could not rejoin channel: {exc}")
             return True
         if not self.config.kick_resistance:
             return False
@@ -1315,6 +1380,13 @@ class TeamTalkSession:
             self.client.closeTeamTalk()
         except Exception:
             pass
+        # The native client tears down its internal threads asynchronously
+        # after closeTeamTalk returns.  Exiting the interpreter while those
+        # threads are still winding down can segfault the process (observed
+        # as "sleep_hook failed" from the ACE layer followed by a core dump
+        # when another client was connected).  Give the teardown a moment to
+        # finish before the process exits.
+        time.sleep(max(0.0, _env_float("TT_SHUTDOWN_SETTLE_SECONDS", 1.0)))
         try:
             # The official Python wrapper calls closeTeamTalk again from its
             # TeamTalk.__del__.  Shadow that instance method after the native
@@ -1337,6 +1409,15 @@ class TeamTalkSession:
     def join_channel(self, channel_id: int, password: str = "") -> int:
         if channel_id < 0:
             raise TeamTalkConfigurationError("channel ID cannot be negative")
+        # Joining the channel the client is already in is a no-op: TeamTalk
+        # rejects a duplicate join with a command error, and kick recovery
+        # calls this to resume after the client was moved to the root channel.
+        try:
+            if sdk_int(self.client.getMyChannelID(), -1) == channel_id:
+                self.channel_id = channel_id
+                return channel_id
+        except Exception:
+            pass
         command = self._check_command(
             self.client.doJoinChannelByID(channel_id, sdk_string(self.sdk, password)),
             "join channel",
@@ -1373,7 +1454,9 @@ class TeamTalkSession:
         if self.channel_id is not None:
             return self.channel_id
         channel_id = sdk_int(self.client.getMyChannelID(), -1)
-        if channel_id < 0:
+        # TeamTalk reports zero (not a negative number) when the client is in
+        # no channel, so zero must be rejected here too.
+        if channel_id <= 0:
             raise TeamTalkConfigurationError(
                 "the client is not in a channel; supply --channel-id or --channel-path"
             )
@@ -1510,6 +1593,18 @@ class TeamTalkSession:
         self._pump_thread = thread
         thread.start()
 
+    def _pump_scan_interval_ms(self) -> int:
+        """Milliseconds the pump waits inside getMessage between event scans."""
+
+        interval_ms = 500
+        try:
+            interval_env = int(float(os.environ.get("TT_KILL_SWITCH_SCAN_MS") or 500))
+            if interval_env > 0:
+                interval_ms = interval_env
+        except ValueError:
+            pass
+        return interval_ms
+
     def _stop_event_pump(self) -> None:
         """Signal the pump thread to stop and wait briefly for it to exit."""
 
@@ -1519,19 +1614,18 @@ class TeamTalkSession:
             self._event_cv.notify_all()
         thread = self._pump_thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+            # The pump can be blocked inside getMessage for up to one scan
+            # interval, so wait at least that long plus a margin.  A fixed
+            # short timeout could expire while the pump is still inside the
+            # native client, and reconnect() would then close that client
+            # out from under it.
+            thread.join(timeout=self._pump_scan_interval_ms() / 1000.0 + 1.0)
         self._pump_thread = None
 
     def _event_pump_loop(self) -> None:
         """Background loop: drain SDK events, scan for the kill switch, buffer."""
 
-        interval_ms = 500
-        try:
-            interval_env = int(float(os.environ.get("TT_KILL_SWITCH_SCAN_MS") or 500))
-            if interval_env > 0:
-                interval_ms = interval_env
-        except ValueError:
-            pass
+        interval_ms = self._pump_scan_interval_ms()
         while not self._pump_stop.is_set() and not kill_switch_triggered():
             client = getattr(self, "client", None)
             if client is None:
