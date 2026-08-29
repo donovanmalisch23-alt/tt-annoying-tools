@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
 import tt_message_spammer as mod
@@ -141,6 +143,49 @@ class TestPromptNumberedIndex:
         assert mod.prompt_numbered_index("Pick", ["a", "b", "c"]) == 1
         out = capsys.readouterr().out
         assert "1. a" in out and "3. c" in out
+
+
+class TestPromptPrivateRecipients:
+    """The interactive picker selects users by NAME, never by their IDs."""
+
+    def _session(self, users):
+        return types.SimpleNamespace(list_users=lambda: list(users))
+
+    def _script_input(self, monkeypatch, answers):
+        answers = iter(answers)
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    def test_returns_names_not_ids(self, monkeypatch, capsys):
+        users = [
+            {"id": 5, "username": "amy", "nickname": "Amy",
+             "display_name": "Amy", "channel_path": "/Lobby"},
+            {"id": 6, "username": "", "nickname": "Bobby",
+             "display_name": "Bobby", "channel_path": ""},
+        ]
+        self._script_input(monkeypatch, ["1", "y", "2", "n"])
+        names, anonymous_ids = mod.prompt_private_recipients(self._session(users))
+        assert names == ["amy", "Bobby"]
+        assert anonymous_ids == []
+        out = capsys.readouterr().out
+        # listed by name — the IDs never appear
+        assert "1. Amy — /Lobby" in out
+        assert "2. Bobby" in out
+        assert "user 5" not in out and "user 6" not in out
+
+    def test_anonymous_user_falls_back_to_id(self, monkeypatch):
+        users = [
+            {"id": 9, "username": "", "nickname": "",
+             "display_name": "", "channel_path": ""},
+        ]
+        self._script_input(monkeypatch, ["1", "n"])
+        names, anonymous_ids = mod.prompt_private_recipients(self._session(users))
+        # no name to track: the raw ID is the only identity available
+        assert names == []
+        assert anonymous_ids == [9]
+
+    def test_no_users_rejected(self):
+        with pytest.raises(TeamTalkConfigurationError, match="no online"):
+            mod.prompt_private_recipients(self._session([]))
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +389,74 @@ class TestSendOnSession:
         # kicked attempt delivered nothing and was not counted or repeated
         assert session.private_messages == [("psst", 44), ("psst", 44)]
         assert session.reconnect_calls == 1
+
+    def test_private_relog_mid_run_retargets_fresh_id(
+        self, tool_session_factory
+    ):
+        # Continuous re-scan with no kick involved: amy relogs on her own
+        # between sends and the server hands her a brand-new ID.  The roster
+        # is re-read by name before every send, so her new ID becomes the
+        # target — the count neither restarts nor overruns.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = [{"id": 4, "username": "amy", "nickname": "Amy"}]
+
+        real_send = session.send_private_message
+
+        def send_then_relog(message, user_id):
+            result = real_send(message, user_id)
+            if user_id == 4:  # her first login session just ended
+                session.users = [{"id": 44, "username": "amy", "nickname": "Amy"}]
+            return result
+
+        session.send_private_message = send_then_relog
+
+        rc = mod.send_messages_on_session(
+            session=session, message="psst", count=2, interval=0, wait=0,
+            target="private", recipient_names=["amy"],
+        )
+        assert rc == 0
+        assert session.private_messages == [("psst", 4), ("psst", 44)]
+
+    def test_private_relog_matched_by_nickname(self, tool_session_factory):
+        # Same relog retargeting for a user with no username: the nickname is
+        # the identity, so the same nickname with a fresh ID is the target.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = [{"id": 4, "username": "", "nickname": "Amy"}]
+
+        real_send = session.send_private_message
+
+        def send_then_relog(message, user_id):
+            result = real_send(message, user_id)
+            if user_id == 4:
+                session.users = [{"id": 77, "username": "", "nickname": "Amy"}]
+            return result
+
+        session.send_private_message = send_then_relog
+
+        rc = mod.send_messages_on_session(
+            session=session, message="psst", count=2, interval=0, wait=0,
+            target="private", recipient_names=["Amy"],
+        )
+        assert rc == 0
+        assert session.private_messages == [("psst", 4), ("psst", 77)]
+
+    def test_name_display_enriched_from_roster(self, tool_session_factory, capsys):
+        # A name-keyed recipient prints with its roster label, not the raw
+        # typed text.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = [
+            {"id": 9, "username": "amy", "nickname": "Amy Sunshine",
+             "display_name": "Amy Sunshine"}
+        ]
+        rc = mod.send_messages_on_session(
+            session=session, message="psst", count=1, interval=0, wait=0,
+            target="private", recipient_names=["amy"],
+        )
+        assert rc == 0
+        assert "Amy Sunshine (@amy)" in capsys.readouterr().out
 
     def test_private_kick_gives_up_after_consecutive_failures(
         self, tool_session_factory, capsys

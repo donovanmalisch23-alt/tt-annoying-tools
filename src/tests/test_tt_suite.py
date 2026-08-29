@@ -642,6 +642,31 @@ class TestRunPrivateOperations:
         assert session.private_messages == [("ping", 55), ("ping", 55)]
         assert session.reconnect_calls == 1
 
+    def test_relog_mid_run_retargets_fresh_id(self, tool_session_factory):
+        # Continuous re-scan with no kick involved: amy relogs on her own
+        # between sends and the server hands her a brand-new ID.  The roster
+        # is re-read by name before every send, so the new ID becomes the
+        # target and the delivered total stays exactly message_count.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = self._roster((5, "amy"))
+
+        real_send = session.send_private_message
+
+        def send_then_relog(message, user_id):
+            result = real_send(message, user_id)
+            if user_id == 5:  # her first login session just ended
+                session.users = self._roster((55, "amy"))
+            return result
+
+        session.send_private_message = send_then_relog
+
+        assert tt_suite.run_private_operations(
+            session, [("amy", "Amy")],
+            message="ping", message_count=2, interval=0,
+        ) is True
+        assert session.private_messages == [("ping", 5), ("ping", 55)]
+
     def test_offline_recipient_is_skipped_not_counted(self, tool_session_factory, capsys):
         factory, _created = tool_session_factory
         session = factory()(None)

@@ -295,8 +295,16 @@ def prompt_channel(session) -> None:
     print(f"Joined {selected.get('path') or selected.get('name') or selected['id']}.")
 
 
-def prompt_private_recipients(session) -> list[int]:
-    """Select up to 20 online users one at a time for private messages."""
+def prompt_private_recipients(session) -> tuple[list[str], list[int]]:
+    """Select up to 20 online users one at a time for private messages.
+
+    Selected users are returned by NAME (username, or nickname when the
+    username is blank) — not by their server-assigned IDs.  The run keeps
+    re-scanning the roster by that name before every send, so a recipient who
+    relogs mid-run and is handed a brand-new user ID is still found and
+    retargeted.  A user with no name at all is returned as a raw ID, because
+    an ID is the only identity they have.
+    """
 
     users = session.list_users()
     if not users:
@@ -306,12 +314,10 @@ def prompt_private_recipients(session) -> list[int]:
     while True:
         print("Available private-message recipients:")
         for index, user in enumerate(users, start=1):
-            user_id = int(user["id"])
-            display_name = str(user.get("display_name") or f"user {user_id}")
             channel_path = str(user.get("channel_path") or "")
             location = f" — {channel_path}" if channel_path else ""
             selected = " [selected]" if index in selected_indices else ""
-            print(f"  {index}. {display_name} (user {user_id}){location}{selected}")
+            print(f"  {index}. {_user_display(user)}{location}{selected}")
 
         selection_number = len(selected_indices) + 1
         value = prompt_text(f"Type the number for User {selection_number}")
@@ -330,8 +336,7 @@ def prompt_private_recipients(session) -> list[int]:
 
         selected_indices.append(selection)
         chosen = users[selection - 1]
-        chosen_display = str(chosen.get("display_name") or f"user {chosen['id']}")
-        print(f"Selected User {len(selected_indices)}: {chosen_display}.")
+        print(f"Selected User {len(selected_indices)}: {_user_display(chosen)}.")
         if len(selected_indices) >= MAX_PRIVATE_RECIPIENTS:
             print(f"Reached the {MAX_PRIVATE_RECIPIENTS}-user selection limit.")
             break
@@ -342,7 +347,16 @@ def prompt_private_recipients(session) -> list[int]:
         ):
             break
 
-    return [int(users[index - 1]["id"]) for index in selected_indices]
+    names: list[str] = []
+    anonymous_ids: list[int] = []
+    for index in selected_indices:
+        user = users[index - 1]
+        name = _user_identity(user)
+        if name:
+            names.append(name)
+        else:
+            anonymous_ids.append(int(user["id"]))
+    return names, anonymous_ids
 
 
 def send_messages(
@@ -414,6 +428,36 @@ def _user_key(user) -> str:
     return ""
 
 
+def _user_identity(user) -> str:
+    """The name to track this user by: username, else nickname, else nothing.
+
+    A user with neither has no name to be re-found by, so only their raw
+    server ID can identify them.
+    """
+
+    for field in ("username", "nickname"):
+        value = str(user.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _user_display(user) -> str:
+    """Human-readable label: nickname plus @username when the two differ."""
+
+    username = str(user.get("username") or "").strip()
+    display = str(
+        user.get("display_name") or user.get("nickname") or ""
+    ).strip()
+    if username and display and display.casefold() != username.casefold():
+        return f"{display} (@{username})"
+    if display:
+        return display
+    if username:
+        return f"@{username}"
+    return f"user {user.get('id')}"
+
+
 def _resolve_recipients(session: TeamTalkSession, recipient_ids: Sequence[int]) -> list:
     """Map the requested user IDs onto usernames once, up front.
 
@@ -435,14 +479,8 @@ def _resolve_recipients(session: TeamTalkSession, recipient_ids: Sequence[int]) 
                 {"key": "", "id": int(recipient_id), "display": f"user {recipient_id}"}
             )
             continue
-        display = str(
-            user.get("display_name") or user.get("nickname") or f"user {recipient_id}"
-        )
-        username = str(user.get("username") or "").strip()
-        if username and display.casefold() != username.casefold():
-            display = f"{display} (@{username})"
         resolved.append(
-            {"key": _user_key(user), "id": int(user["id"]), "display": display}
+            {"key": _user_key(user), "id": int(user["id"]), "display": _user_display(user)}
         )
     return resolved
 
@@ -471,6 +509,25 @@ def _name_recipients(recipient_names: Sequence[str]) -> list[dict[str, object]]:
         for name in recipient_names
         if str(name).strip()
     ]
+
+
+def _enrich_name_displays(session: TeamTalkSession, recipients: list) -> None:
+    """Upgrade name-keyed recipients to their roster display labels.
+
+    A recipient selected as "amy" (typed or from the interactive picker)
+    prints as "Amy (@amy)" once the roster is consulted.  Purely cosmetic —
+    the send-time identity is the name either way.
+    """
+
+    try:
+        roster = session.list_users(include_self=True)
+    except (TeamTalkError, TeamTalkConfigurationError, OSError):
+        return
+    by_key = {_user_key(user): user for user in roster}
+    for recipient in recipients:
+        user = by_key.get(str(recipient.get("key") or ""))
+        if user is not None:
+            recipient["display"] = _user_display(user)
 
 
 def send_messages_on_session(
@@ -533,6 +590,7 @@ def send_messages_on_session(
     recipients = _resolve_recipients(session, recipient_ids) + _name_recipients(
         recipient_names
     )
+    _enrich_name_displays(session, recipients)
     for index in range(count):
         for recipient_index, recipient in enumerate(recipients, start=1):
             while True:
@@ -599,11 +657,14 @@ def interactive_run() -> int:
     with TeamTalkSession(config) as session:
         print("Connected and logged in to TeamTalk.")
         target = prompt_target()
+        user_ids: Optional[list[int]] = None
+        user_names: list[str] = []
         if target == "channel":
             prompt_channel(session)
-            user_ids: Optional[list[int]] = None
         else:
-            user_ids = prompt_private_recipients(session)
+            # Selected users come back by name so the run keeps re-resolving
+            # their current ID from the roster at every send.
+            user_names, user_ids = prompt_private_recipients(session)
 
         message = validate_message(prompt_text("Send what text?", DEFAULT_MESSAGE))
         count = prompt_int(
@@ -630,6 +691,7 @@ def interactive_run() -> int:
             wait=wait,
             target=target,
             recipient_ids=user_ids or (),
+            recipient_names=user_names,
         )
 
 

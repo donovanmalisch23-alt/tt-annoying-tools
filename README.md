@@ -317,9 +317,14 @@ remembers about a person on their **username** instead:
   run tracks the name from then on. `--user-id all` still selects every
   discovered user. Prefer the name flags — an ID only identifies a login
   session, not a person.
-- A recipient's current ID is looked up by username at every send (and again
-  after every reconnect), so a user who relogged mid-run still receives their
-  remaining messages — and only their remaining ones.
+- A recipient's current ID is looked up by name at every send — not only
+  after a reconnect — so a user who relogs mid-run (same nickname, brand-new
+  server ID) is retargeted automatically: the new ID becomes the target for
+  their remaining messages, and only their remaining ones.
+- The message tool's interactive recipient picker also returns your selection
+  as names (username, or nickname when there is no username), never as IDs.
+  A user with no name at all is the one exception: an ID is the only
+  identity they have.
 - The response bot's allowlist and per-user cooldown also key on the username,
   so someone cannot dodge their cooldown by reconnecting, and an allowlisted
   user stays allowlisted across a relog.
@@ -337,7 +342,8 @@ discovers and prints targets without joining or sending.
 Message sends and leave/join tests accept a zero delay; there is no enforced
 one-second delay between messages. The message tool accepts any positive send
 count and its interactive private-message picker can select up to 20 users per
-run. Login/logout and leave/join tools also accept any positive cycle count.
+run, tracked by name from the moment you pick them. Login/logout and
+leave/join tools also accept any positive cycle count.
 The response bot requires
 an explicit allowlist (`--allow-user` by username, or `--allow-user-id`) or
 `--allow-all`, responds only to `!hello` by default, applies a per-user
