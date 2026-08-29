@@ -16,7 +16,6 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
-    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
@@ -85,23 +84,26 @@ def run_cycles(*, config, cycles: int, interval: float, wait: float) -> int:
         print(f"You have {wait:g} seconds before the login/logout test starts…")
         time.sleep(wait)
 
+    # Only completed cycles count: a kick retries the interrupted cycle after
+    # the reconnect (which has already logged the session back in), so the run
+    # performs exactly ``cycles`` logins — protection never adds extra ones.
     with TeamTalkSession(config) as session:
-        for index in range(cycles):
-            if kill_switch_triggered():
-                print("[kill-switch] stopping login/logout test.")
-                return 130
+        completed = 0
+        while completed < cycles:
             try:
-                if index:
+                if not session.logged_in:
                     session.login()
-                print(f"Cycle {index + 1}/{cycles}: logged in.")
+                print(f"Cycle {completed + 1}/{cycles}: logged in.")
                 session.logout()
-                print(f"Cycle {index + 1}/{cycles}: logged out.")
+                print(f"Cycle {completed + 1}/{cycles}: logged out.")
             except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
-                print(f"[kick-resistance] cycle {index + 1} interrupted: {exc}")
+                print(f"[kick-resistance] cycle {completed + 1} interrupted: {exc}")
                 if not session.check_and_reconnect():
                     print("Could not reconnect; stopping login/logout test.")
                     return 1
-            if index + 1 < cycles and interval:
+                continue  # retry the same cycle; the counter does not move
+            completed += 1
+            if completed < cycles and interval:
                 time.sleep(interval)
     print("Finished login/logout test.")
     return 0

@@ -22,7 +22,6 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
-    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
@@ -64,12 +63,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="read one UTF-8 message from a file",
     )
     parser.add_argument(
+        "--user",
+        action="append",
+        metavar="NAME[,NAME...]",
+        help=(
+            "private-message recipient by username; repeat or comma-separate "
+            f"for up to {MAX_PRIVATE_RECIPIENTS} users. Users are tracked by "
+            "username, so a recipient keeps their message budget across a "
+            "reconnect even when the server hands out a fresh user ID"
+        ),
+    )
+    parser.add_argument(
         "--user-id",
         action="append",
         metavar="ID[,ID...]",
         help=(
-            "private-message recipient user ID; repeat or comma-separate "
-            f"for up to {MAX_PRIVATE_RECIPIENTS} users"
+            "private-message recipient by the server's numeric user ID; "
+            "repeat or comma-separate for up to "
+            f"{MAX_PRIVATE_RECIPIENTS} users. Each ID is resolved to the "
+            "user's username at startup and tracked by that name from then on "
+            "(prefer --user: IDs change on every login)"
         ),
     )
     parser.add_argument(
@@ -156,8 +169,31 @@ def parse_user_ids(values: object) -> list[int]:
     return user_ids
 
 
+def parse_user_names(values: object) -> list[str]:
+    """Parse one or more repeatable or comma-separated recipient usernames."""
+
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = [values]
+    else:
+        raw_values = list(values)  # type: ignore[arg-type]
+
+    user_names: list[str] = []
+    for raw_value in raw_values:
+        for value in str(raw_value).split(","):
+            value = value.strip()
+            if not value:
+                raise TeamTalkConfigurationError(
+                    "--user must contain one or more usernames"
+                )
+            user_names.append(value)
+    return user_names
+
+
 def validate_args(args: argparse.Namespace) -> list[int]:
     user_ids = parse_user_ids(args.user_id)
+    user_names = parse_user_names(args.user)
     if args.count < 1:
         raise TeamTalkConfigurationError("--count must be at least 1")
     if args.interval < MIN_REPEAT_INTERVAL:
@@ -165,17 +201,19 @@ def validate_args(args: argparse.Namespace) -> list[int]:
     if not 0 <= args.wait <= MAX_WAIT:
         raise TeamTalkConfigurationError(f"--wait must be between 0 and {MAX_WAIT:g}s")
     if args.target == "private":
-        if not user_ids:
+        if not user_ids and not user_names:
             raise TeamTalkConfigurationError(
-                "at least one --user-id is required for private messages"
+                "at least one --user or --user-id is required for private messages"
             )
-        if len(user_ids) > MAX_PRIVATE_RECIPIENTS:
+        if len(user_ids) + len(user_names) > MAX_PRIVATE_RECIPIENTS:
             raise TeamTalkConfigurationError(
                 f"private messages support at most {MAX_PRIVATE_RECIPIENTS} recipients "
                 "per run"
             )
-    elif user_ids:
-        raise TeamTalkConfigurationError("--user-id is only valid with --target private")
+    elif user_ids or user_names:
+        raise TeamTalkConfigurationError(
+            "--user and --user-id are only valid with --target private"
+        )
     return user_ids
 
 
@@ -291,8 +329,9 @@ def prompt_private_recipients(session) -> list[int]:
             continue
 
         selected_indices.append(selection)
-        user_id = int(users[selection - 1]["id"])
-        print(f"Selected User {len(selected_indices)}: user {user_id}.")
+        chosen = users[selection - 1]
+        chosen_display = str(chosen.get("display_name") or f"user {chosen['id']}")
+        print(f"Selected User {len(selected_indices)}: {chosen_display}.")
         if len(selected_indices) >= MAX_PRIVATE_RECIPIENTS:
             print(f"Reached the {MAX_PRIVATE_RECIPIENTS}-user selection limit.")
             break
@@ -316,6 +355,7 @@ def send_messages(
     target: str,
     user_ids: Optional[Sequence[int]] = None,
     user_id: Optional[int] = None,
+    user_names: Optional[Sequence[str]] = None,
 ) -> int:
     if user_id is not None:
         if user_ids is not None:
@@ -325,9 +365,10 @@ def send_messages(
         recipient_ids = [user_id]
     else:
         recipient_ids = list(user_ids or ())
+    recipient_names = [str(name).strip() for name in (user_names or ()) if str(name).strip()]
 
     if target == "private":
-        if not recipient_ids:
+        if not recipient_ids and not recipient_names:
             raise TeamTalkConfigurationError(
                 "at least one recipient is required for private messages"
             )
@@ -335,12 +376,12 @@ def send_messages(
             raise TeamTalkConfigurationError(
                 "private-message recipient user IDs must be non-negative"
             )
-        if len(recipient_ids) > MAX_PRIVATE_RECIPIENTS:
+        if len(recipient_ids) + len(recipient_names) > MAX_PRIVATE_RECIPIENTS:
             raise TeamTalkConfigurationError(
                 f"private messages support at most {MAX_PRIVATE_RECIPIENTS} recipients "
                 "per run"
             )
-    elif recipient_ids:
+    elif recipient_ids or recipient_names:
         raise TeamTalkConfigurationError(
             "recipients are only valid with --target private"
         )
@@ -354,7 +395,82 @@ def send_messages(
             wait=wait,
             target=target,
             recipient_ids=recipient_ids,
+            recipient_names=recipient_names,
         )
+
+
+# Upper bound on consecutive failed sends before the run gives up — reconnects
+# after kicks are retried, but not forever.
+MAX_CONSECUTIVE_FAILURES = 3
+
+
+def _user_key(user) -> str:
+    """Stable identity for a user: username (never the server-assigned ID)."""
+
+    for field in ("username", "nickname"):
+        value = str(user.get(field) or "").strip()
+        if value:
+            return value.casefold()
+    return ""
+
+
+def _resolve_recipients(session: TeamTalkSession, recipient_ids: Sequence[int]) -> list:
+    """Map the requested user IDs onto usernames once, up front.
+
+    Server IDs change on every login, so the run tracks each recipient by
+    username and re-resolves the current ID at send time.  A recipient that is
+    not online keeps its raw ID as a fallback with a printed note.
+    """
+
+    roster = session.list_users(include_self=True)
+    resolved = []
+    for recipient_id in recipient_ids:
+        user = next(
+            (entry for entry in roster if int(entry["id"]) == int(recipient_id)),
+            None,
+        )
+        if user is None:
+            print(f"User ID {recipient_id} is not online right now; keeping the raw ID.")
+            resolved.append(
+                {"key": "", "id": int(recipient_id), "display": f"user {recipient_id}"}
+            )
+            continue
+        display = str(
+            user.get("display_name") or user.get("nickname") or f"user {recipient_id}"
+        )
+        username = str(user.get("username") or "").strip()
+        if username and display.casefold() != username.casefold():
+            display = f"{display} (@{username})"
+        resolved.append(
+            {"key": _user_key(user), "id": int(user["id"]), "display": display}
+        )
+    return resolved
+
+
+def _current_user_id(session: TeamTalkSession, recipient) -> Optional[int]:
+    """Resolve a recipient to its *current* server ID by username."""
+
+    key = recipient["key"]
+    if not key:
+        return recipient["id"]
+    for user in session.list_users(include_self=True):
+        if _user_key(user) == key:
+            return int(user["id"])
+    return None
+
+
+def _name_recipients(recipient_names: Sequence[str]) -> list[dict[str, object]]:
+    """Build recipient entries from --user names; no roster lookup needed.
+
+    A named recipient is tracked by that username from the start — the name is
+    the identity, so there is no ID to go stale.
+    """
+
+    return [
+        {"key": name.casefold(), "id": -1, "display": name}
+        for name in recipient_names
+        if str(name).strip()
+    ]
 
 
 def send_messages_on_session(
@@ -365,58 +481,105 @@ def send_messages_on_session(
     interval: float,
     wait: float,
     target: str,
-    recipient_ids: Sequence[int],
+    recipient_ids: Sequence[int] = (),
+    recipient_names: Sequence[str] = (),
 ) -> int:
-    """Send on an already-connected session so interactive selection reconnects once."""
+    """Send on an already-connected session so interactive selection reconnects once.
+
+    Only delivered messages count: a kick retries the interrupted send after
+    reconnecting (re-resolving the recipient's fresh ID by username), so each
+    recipient gets exactly ``count`` messages — the run never restarts the
+    numbering or multiplies the totals.
+    """
 
     if wait:
         print(f"You have {wait:g} seconds before the API starts sending…")
         time.sleep(wait)
 
-    total_sends = count * len(recipient_ids) if target == "private" else count
-    sent_count = 0
+    misses = 0
     if target == "channel":
         try:
             session.rejoin_channel_id = session.current_channel_id()
-            session.rejoin_channel_password = session.config.channel_password
+            # The session may carry no config (interactive selection reuses an
+            # already-built session; tests inject bare fakes), so read the
+            # rejoin password defensively.
+            config = getattr(session, "config", None)
+            session.rejoin_channel_password = getattr(config, "channel_password", "") or ""
         except TeamTalkError:
             pass
-    for index in range(count):
-        if kill_switch_triggered():
-            print("[kill-switch] stopping message test.")
-            return 130
-        try:
-            if target == "private":
-                for recipient_index, recipient_id in enumerate(recipient_ids, start=1):
-                    session.send_private_message(message, recipient_id)
-                    sent_count += 1
-                    if len(recipient_ids) == 1:
-                        print(f"Sent {index + 1}/{count} to user {recipient_id}.")
-                    else:
-                        print(
-                            f"Sent message {index + 1}/{count} to user {recipient_id} "
-                            f"({recipient_index}/{len(recipient_ids)} recipients)."
-                        )
-                    if sent_count < total_sends and interval:
-                        time.sleep(interval)
-            else:
+        sent = 0
+        while sent < count:
+            try:
                 channel_id = session.current_channel_id()
                 session.send_channel_message(message, channel_id)
-                sent_count += 1
-                print(f"Sent {index + 1}/{count} to channel {channel_id}.")
-                if sent_count < total_sends and interval:
-                    time.sleep(interval)
-        except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
-            print(f"[kick-resistance] send {index + 1} interrupted: {exc}")
-            if not session.check_and_reconnect():
-                print("Could not reconnect; stopping message test.")
-                return 1
+            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                print(f"[kick-resistance] send {sent + 1} interrupted: {exc}")
+                misses += 1
+                if misses >= MAX_CONSECUTIVE_FAILURES:
+                    print("Too many failed sends in a row; stopping message test.")
+                    return 1
+                if not session.check_and_reconnect():
+                    print("Could not reconnect; stopping message test.")
+                    return 1
+                continue
+            misses = 0
+            sent += 1
+            print(f"Sent {sent}/{count} to channel {channel_id}.")
+            if sent < count and interval:
+                time.sleep(interval)
+        print("Finished sending.")
+        return 0
+
+    recipients = _resolve_recipients(session, recipient_ids) + _name_recipients(
+        recipient_names
+    )
+    for index in range(count):
+        for recipient_index, recipient in enumerate(recipients, start=1):
+            while True:
+                user_id = _current_user_id(session, recipient)
+                if user_id is None:
+                    print(
+                        f"{recipient['display']} is not online; "
+                        "skipping them this round."
+                    )
+                    break
+                try:
+                    session.send_private_message(message, user_id)
+                except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                    print(
+                        f"[kick-resistance] send to {recipient['display']} "
+                        f"interrupted: {exc}"
+                    )
+                    misses += 1
+                    if misses >= MAX_CONSECUTIVE_FAILURES:
+                        print("Too many failed sends in a row; stopping message test.")
+                        return 1
+                    if not session.check_and_reconnect():
+                        print("Could not reconnect; stopping message test.")
+                        return 1
+                    continue  # retry the same send; the counters do not move
+                misses = 0
+                break
+            if user_id is None:
+                continue
+            if len(recipients) == 1:
+                print(f"Sent {index + 1}/{count} to {recipient['display']}.")
+            else:
+                print(
+                    f"Sent message {index + 1}/{count} to {recipient['display']} "
+                    f"({recipient_index}/{len(recipients)} recipients)."
+                )
+            if (
+                recipient_index < len(recipients) or index + 1 < count
+            ) and interval:
+                time.sleep(interval)
     print("Finished sending.")
     return 0
 
 
 def run(args: argparse.Namespace) -> int:
     user_ids = validate_args(args)
+    user_names = parse_user_names(args.user)
     message = read_message(args)
     config = config_from_args(args)
     return send_messages(
@@ -427,6 +590,7 @@ def run(args: argparse.Namespace) -> int:
         wait=args.wait,
         target=args.target,
         user_ids=user_ids,
+        user_names=user_names,
     )
 
 

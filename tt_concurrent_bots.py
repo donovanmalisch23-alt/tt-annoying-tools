@@ -39,7 +39,6 @@ from tt_teamtalk import (
     comma_int,
     config_dir,
     config_from_args,
-    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_int,
@@ -133,13 +132,10 @@ def _sit_idle(session: TeamTalkSession, stop_event: threading.Event) -> None:
 
     Periodically re-checks that the connection is still up so a kicked bot
     reconnects and keeps jamming the server, while the session's background
-    event pump keeps draining the SDK queue (which lets the universal kill
-    switch fire).
+    event pump keeps draining the SDK queue.
     """
 
     while not stop_event.is_set():
-        if kill_switch_triggered():
-            return
         if not session.is_online():
             if not session.check_and_reconnect():
                 return
@@ -164,7 +160,7 @@ def _idle_bot(
     max_attempts = max(1, int(_env_float("TT_BOT_CONNECT_ATTEMPTS", 5.0)))
     retry_delay = _env_float("TT_BOT_RETRY_DELAY", 2.0)
     for attempt in range(max_attempts):
-        if stop_event.is_set() or kill_switch_triggered():
+        if stop_event.is_set():
             return
         try:
             with TeamTalkSession(config) as session:
@@ -182,17 +178,13 @@ def _worker_process(
     config: Any,
     start_index: int,
     count: int,
-    kill_event: Any,
     worker_index: int,
     worker_count: int,
 ) -> None:
     """Run one chunk of idle bots in threads inside a child process.
 
     Each worker process stays under the native library's FD_SETSIZE ceiling by
-    running at most ``_max_concurrent_bots()`` bots.  A local kill-switch
-    watcher mirrors the process-local kill switch into the shared ``kill_event``
-    so the parent can stop every other worker the moment any bot receives the
-    emergency-stop phrase.
+    running at most ``_max_concurrent_bots()`` bots.
 
     Bot threads are started with a short delay between them.  Without it every
     bot opens its connection in the same instant; the server's connect backlog
@@ -221,16 +213,6 @@ def _worker_process(
         )
         for offset in range(count)
     ]
-
-    def _watcher() -> None:
-        while not stop_event.is_set():
-            if kill_switch_triggered():
-                kill_event.set()
-                stop_event.set()
-                return
-            stop_event.wait(0.25)
-
-    threading.Thread(target=_watcher, name="kill-switch-watcher", daemon=True).start()
 
     start_delay = _env_float("TT_BOT_START_DELAY", 0.1)
     for thread in threads:
@@ -317,13 +299,12 @@ def _run(config: Any, args: argparse.Namespace) -> int:
             "--confirm is required to launch idle bots (use --dry-run to preview)"
         )
 
-    kill_event = multiprocessing.Event()
     processes: list[multiprocessing.Process] = []
     start_index = 0
     for idx, chunk in enumerate(chunks, start=1):
         process = multiprocessing.Process(
             target=_worker_process,
-            args=(config, start_index, chunk, kill_event, idx, len(chunks)),
+            args=(config, start_index, chunk, idx, len(chunks)),
             name=f"tt-idle-worker-{idx}",
             daemon=True,
         )
@@ -331,19 +312,7 @@ def _run(config: Any, args: argparse.Namespace) -> int:
         process.start()
         start_index += chunk
 
-    def _kill_monitor() -> None:
-        kill_event.wait()
-        for process in processes:
-            if process.is_alive():
-                process.terminate()
-
-    monitor = threading.Thread(target=_kill_monitor, name="kill-monitor", daemon=True)
-    monitor.start()
-
-    print(
-        f"Launched {total_bots} idle bot(s). Press Ctrl+C to stop, or send the "
-        "kill phrase to any bot to shut everything down."
-    )
+    print(f"Launched {total_bots} idle bot(s). Press Ctrl+C to stop.")
 
     try:
         for process in processes:
@@ -356,10 +325,6 @@ def _run(config: Any, args: argparse.Namespace) -> int:
             process.join(timeout=5.0)
         print("Stopped.")
         return 130
-
-    if kill_event.is_set():
-        print("[kill-switch] shutting down all workers.")
-        return 0
 
     for process in processes:
         if process.exitcode not in (0, None):

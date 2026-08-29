@@ -57,6 +57,9 @@ def sdk_text(value: Any) -> str:
         return value
     if isinstance(value, (bytes, bytearray)):
         return bytes(value).split(b"\0", 1)[0].decode("utf-8", "replace")
+    if isinstance(value, int):
+        # bytes(int) would build a zero-filled buffer, silently returning "".
+        return str(value)
 
     raw_value = getattr(value, "value", None)
     if raw_value is not None and raw_value is not value:
@@ -363,8 +366,11 @@ def _sdk_license_accepted_markers() -> list[Path]:
         home = Path.home()
     except (RuntimeError, OSError):
         home = None
+    # _SDK_LICENSE_MARKER already carries its leading dot, so the home
+    # fallback is the same dotfile name in the home directory (a second dot
+    # here produced the broken name "..tt-sdk-license-accepted").
     if home is not None and home not in {m.parent for m in markers}:
-        markers.append(home / ("." + _SDK_LICENSE_MARKER))
+        markers.append(home / _SDK_LICENSE_MARKER)
     return markers
 
 
@@ -479,70 +485,7 @@ def ensure_sdk_license_accepted(*, pre_choice: Optional[bool] = None) -> None:
         print("Please answer Y or N.")
 
 
-# --------------------------------------------------------------------------- #
-# Universal kill switch
-# --------------------------------------------------------------------------- #
-#
-# When any tool receives a private (user-to-user) TeamTalk text message whose
-# body equals the configured kill phrase (default "SW", case-insensitive), the
-# tool shuts down completely.  This is an emergency stop any connected user can
-# trigger, independent of allowlists/whitelists.  A backstop thread forces
-# process exit shortly after the switch fires, so a stuck loop cannot keep the
-# tool alive; loops that poll for it also exit cleanly.
 _NO_EVENT = types.SimpleNamespace(nClientEvent=0)
-
-
-_KILL_SWITCH_EVENT = threading.Event()
-
-
-def kill_switch_phrase() -> str:
-    """The text that, received as a private message, triggers shutdown."""
-
-    return (os.environ.get("TT_KILL_SWITCH_PHRASE") or "SW").strip() or "SW"
-
-
-def _kill_switch_env_enabled() -> bool:
-    value = os.environ.get("TT_KILL_SWITCH")
-    if value is None:
-        return True
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def kill_switch_triggered() -> bool:
-    """Return True once the universal kill switch has fired."""
-
-    return _KILL_SWITCH_EVENT.is_set()
-
-
-def _matches_kill_phrase(text: str) -> bool:
-    phrase = kill_switch_phrase().casefold()
-    body = (text or "").strip().casefold()
-    return bool(phrase) and body == phrase
-
-
-def trigger_kill_switch(reason: str) -> None:
-    """Fire the universal kill switch and force the tool to shut down.
-
-    Idempotent: only the first caller acts.  Sets the global event so polling
-    loops can exit, prints a clear shutdown line, then starts a daemon backstop
-    thread that hard-exits the process a moment later so a blocked loop cannot
-    keep the tool running.
-    """
-
-    if _KILL_SWITCH_EVENT.is_set():
-        return
-    _KILL_SWITCH_EVENT.set()
-    try:
-        backstop = float(os.environ.get("TT_KILL_SWITCH_BACKSTOP") or "2.0")
-    except ValueError:
-        backstop = 2.0
-    print(f"[kill-switch] {reason} -- shutting down now.", flush=True)
-
-    def _force_exit() -> None:
-        time.sleep(max(0.0, backstop))
-        os._exit(0)
-
-    threading.Thread(target=_force_exit, name="kill-switch-backstop", daemon=True).start()
 
 
 @dataclass(frozen=True)
@@ -567,7 +510,6 @@ class ConnectionConfig:
     license_name: Optional[str] = None
     license_key: str = ""
     accept_sdk_license: Optional[bool] = None
-    kill_switch: bool = True
 
 
 def prompt_text(label: str, default: Optional[str] = None, *, secret: bool = False) -> str:
@@ -716,10 +658,6 @@ def prompt_connection_config(*, channel_required: bool) -> ConnectionConfig:
             secret=True,
         )
 
-    kill_switch = prompt_yes_no(
-        "Enable the universal kill switch (shut down on a private 'SW' message)?",
-        _env_bool("TT_KILL_SWITCH", True),
-    )
     return ConnectionConfig(
         host=host,
         tcp_port=tcp_port,
@@ -738,7 +676,6 @@ def prompt_connection_config(*, channel_required: bool) -> ConnectionConfig:
         sdk_library=os.environ.get("TEAMTALK_SDK_LIBRARY") or os.environ.get("TEAMTALK_LIBRARY"),
         license_name=os.environ.get("TT_LICENSE_NAME"),
         license_key=os.environ.get("TT_LICENSE_KEY") or "",
-        kill_switch=kill_switch,
     )
 
 
@@ -874,24 +811,6 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="decline the TeamTalk 5 SDK license terms (or set "
         "TT_ACCEPT_SDK_LICENSE=0). Prevents the SDK from being used.",
     )
-    parser.add_argument(
-        "--kill-switch",
-        dest="kill_switch",
-        action="store_const",
-        const=True,
-        default=_env_bool("TT_KILL_SWITCH", True),
-        help="completely shut down the tool when a private message containing "
-        "the kill phrase is received (default: on). The phrase defaults to 'SW' "
-        "(set TT_KILL_SWITCH_PHRASE); any connected user can trigger it.",
-    )
-    parser.add_argument(
-        "--no-kill-switch",
-        dest="kill_switch",
-        action="store_const",
-        const=False,
-        help="disable the universal SW private-message kill switch "
-        "(or set TT_KILL_SWITCH=0).",
-    )
 
 
 def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
@@ -938,7 +857,6 @@ def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
         license_name=args.license_name,
         license_key=args.license_key or "",
         accept_sdk_license=args.accept_sdk_license,
-        kill_switch=args.kill_switch,
     )
 
 
@@ -965,9 +883,9 @@ class TeamTalkSession:
         self._closed = False
         # Centralized event pump: a single background thread is the sole
         # consumer of the SDK's getMessage() (the SDK is not safe to call from
-        # two threads at once).  It scans every event for the universal kill
-        # switch (hard-cut) and routes the rest through this buffer so the
-        # bot's poll()/_wait_for() can read them without racing the pump.
+        # two threads at once).  It drains events from the native queue and
+        # routes them through this buffer so the bot's poll()/_wait_for() can
+        # read them without racing the pump.
         self._event_buffer: collections.deque = collections.deque()
         self._event_cv = threading.Condition(threading.Lock())
         self._pump_stop = threading.Event()
@@ -1051,8 +969,6 @@ class TeamTalkSession:
             # Events are drained by the background pump thread (the sole
             # getMessage consumer) and delivered through the internal buffer.
             message = self._next_event(remaining_ms)
-            if kill_switch_triggered():
-                raise TeamTalkError("kill switch triggered")
             event = sdk_int(getattr(message, "nClientEvent", 0))
             source = sdk_int(getattr(message, "nSource", -1), -1)
             if event in expected and (command_id is None or source == command_id):
@@ -1355,12 +1271,16 @@ class TeamTalkSession:
         not already raise another exception.
         """
 
-        if self._closed:
+        # Tolerate partially-initialized instances: when __init__ raised
+        # early (e.g. the SDK license was declined) the bookkeeping attributes
+        # never got assigned, but __del__ still funnels here for cleanup.
+        if getattr(self, "_closed", False):
             return
         self._closed = True
         logout_error: Optional[Exception] = None
-        if getattr(self, "client", None) is None:
-            self._stop_event_pump()
+        if getattr(self, "client", None) is None or getattr(self, "_pump_stop", None) is None:
+            if getattr(self, "_pump_stop", None) is not None:
+                self._stop_event_pump()
             return
         # logout() needs the event pump running to receive the logout-success
         # event, so keep it running through logout, then stop it before we
@@ -1570,15 +1490,14 @@ class TeamTalkSession:
             raise TeamTalkConfigurationError("user ID cannot be negative")
         self.send_text(text, user_id=user_id)
 
-    # ----- centralized event pump + universal kill switch ----------------- #
+    # ----- centralized event pump ------------------------------------------ #
 
     def _start_event_pump(self) -> None:
         """Start the single background thread that drains the SDK event queue.
 
         The pump is the only consumer of ``getMessage`` so the SDK is never
-        called from two threads at once.  It scans every event for the
-        universal kill switch (hard cut) and pushes the rest into an internal
-        buffer consumed by ``poll`` / ``_wait_for``.
+        called from two threads at once.  Events go into an internal buffer
+        consumed by ``poll`` / ``_wait_for``.
         """
 
         if self._pump_thread is not None and self._pump_thread.is_alive():
@@ -1596,14 +1515,7 @@ class TeamTalkSession:
     def _pump_scan_interval_ms(self) -> int:
         """Milliseconds the pump waits inside getMessage between event scans."""
 
-        interval_ms = 500
-        try:
-            interval_env = int(float(os.environ.get("TT_KILL_SWITCH_SCAN_MS") or 500))
-            if interval_env > 0:
-                interval_ms = interval_env
-        except ValueError:
-            pass
-        return interval_ms
+        return 500
 
     def _stop_event_pump(self) -> None:
         """Signal the pump thread to stop and wait briefly for it to exit."""
@@ -1623,10 +1535,10 @@ class TeamTalkSession:
         self._pump_thread = None
 
     def _event_pump_loop(self) -> None:
-        """Background loop: drain SDK events, scan for the kill switch, buffer."""
+        """Background loop: drain SDK events and push them into the buffer."""
 
         interval_ms = self._pump_scan_interval_ms()
-        while not self._pump_stop.is_set() and not kill_switch_triggered():
+        while not self._pump_stop.is_set():
             client = getattr(self, "client", None)
             if client is None:
                 time.sleep(0.05)
@@ -1644,11 +1556,6 @@ class TeamTalkSession:
                 continue
             if message is None:
                 continue
-            # Hard cut: scan every event for the kill phrase BEFORE buffering.
-            self._scan_for_kill_switch(message)
-            if kill_switch_triggered():
-                # Force immediate exit (0). Do not return to the main loop.
-                os._exit(0)
             event = sdk_int(getattr(message, "nClientEvent", 0))
             if event:  # ignore CLIENTEVENT_NONE (0) padding from the wait
                 with self._event_cv:
@@ -1672,37 +1579,6 @@ class TeamTalkSession:
 
     def poll(self, wait_ms: int = 1000) -> Any:
         return self._next_event(wait_ms)
-
-    def _scan_for_kill_switch(self, message: Any) -> None:
-        """Fire the universal kill switch on a matching private message.
-
-        Scans an SDK event for a user-to-user text message whose body is the
-        kill phrase (default ``SW``, exact match, case-insensitive).  Channel
-        messages are ignored.  Any connected user can trigger it; it is
-        independent of the whitelist/allowlist because it is an emergency stop.
-        """
-
-        if not self.config.kill_switch or kill_switch_triggered():
-            return
-        if message is None:
-            return
-        event = sdk_int(getattr(message, "nClientEvent", 0))
-        text_event = sdk_event(self.sdk, "CLIENTEVENT_CMD_USER_TEXTMSG")
-        if text_event is None or event != text_event:
-            return
-        text_message = getattr(message, "textmessage", None)
-        if text_message is None:
-            return
-        fields = message_fields(text_message)
-        msgtype_user = getattr(getattr(self.sdk, "TextMsgType", object()), "MSGTYPE_USER", None)
-        if msgtype_user is None or fields["type"] != sdk_int(msgtype_user):
-            return
-        if _matches_kill_phrase(fields["text"]):
-            trigger_kill_switch(
-                f"kill phrase {kill_switch_phrase()!r} received in a private "
-                f"message from {fields['from_username']!r} "
-                f"(user {fields['from_user_id']})"
-            )
 
 
 def message_fields(message: Any) -> dict[str, Any]:

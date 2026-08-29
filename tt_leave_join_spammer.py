@@ -22,7 +22,6 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
-    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
@@ -90,14 +89,15 @@ def run_cycles(*, config, cycles: int, interval: float, wait: float) -> int:
         if config.channel_id is not None:
             session.rejoin_channel_id = config.channel_id
             session.rejoin_channel_password = config.channel_password
-        for index in range(cycles):
-            if kill_switch_triggered():
-                print("[kill-switch] stopping leave/join test.")
-                return 130
+        # Only completed leave/join pairs count: a kick retries the interrupted
+        # cycle after reconnecting, so the server sees exactly ``cycles``
+        # pairs — protection never restarts the numbering or adds extra pairs.
+        completed = 0
+        while completed < cycles:
             try:
                 current_channel = session.current_channel_id()
                 session.leave_channel()
-                print(f"Cycle {index + 1}/{cycles}: left channel {current_channel}.")
+                print(f"Cycle {completed + 1}/{cycles}: left channel {current_channel}.")
                 time.sleep(interval)
                 if config.channel_id is not None:
                     joined_channel = session.join_channel(
@@ -109,21 +109,26 @@ def run_cycles(*, config, cycles: int, interval: float, wait: float) -> int:
                         config.channel_path or "/",
                         config.channel_password,
                     )
-                print(f"Cycle {index + 1}/{cycles}: joined channel {joined_channel}.")
+                print(f"Cycle {completed + 1}/{cycles}: joined channel {joined_channel}.")
             except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
-                print(f"[kick-resistance] cycle {index + 1} interrupted: {exc}")
+                print(f"[kick-resistance] cycle {completed + 1} interrupted: {exc}")
                 if not session.check_and_reconnect():
                     print("Could not reconnect; stopping leave/join test.")
                     return 1
-            if index + 1 < cycles:
+                continue  # retry the same cycle; the counter does not move
+            completed += 1
+            if completed < cycles:
                 time.sleep(interval)
     print("Finished leave/join test.")
     return 0
 
 
 def run(args: argparse.Namespace) -> int:
-    validate_args(args)
+    # Validate the connection first so a missing --host is reported before the
+    # tool-specific channel requirement: the host is the more fundamental
+    # error, and both are checked before any connection is opened.
     config = config_from_args(args)
+    validate_args(args)
     return run_cycles(
         config=config,
         cycles=args.cycles,

@@ -35,7 +35,6 @@ from tt_teamtalk import (
     comma_int,
     config_dir,
     config_from_args,
-    kill_switch_triggered,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
@@ -53,6 +52,9 @@ DEFAULT_INTERVAL = 0.2
 DEFAULT_MESSAGE_COUNT = 1
 DEFAULT_LOGIN_CYCLES = 0
 DEFAULT_JOIN_LEAVE_CYCLES = 0
+# Upper bound on consecutive failed sends to a single target before the run
+# gives up on it — reconnects after kicks are retried, but not forever.
+MAX_CONSECUTIVE_FAILURES = 3
 
 
 def normalize_host(host: str) -> str:
@@ -141,6 +143,28 @@ def parse_user_ids(values: object) -> tuple[list[int], bool]:
     return user_ids, all_users
 
 
+def parse_user_names(values: object) -> list[str]:
+    """Parse one or more repeatable or comma-separated recipient usernames."""
+
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = [values]
+    else:
+        raw_values = list(values)  # type: ignore[arg-type]
+
+    user_names: list[str] = []
+    for raw_value in raw_values:
+        for value in str(raw_value).split(","):
+            value = value.strip()
+            if not value:
+                raise TeamTalkConfigurationError(
+                    "--user must contain one or more usernames"
+                )
+            user_names.append(value)
+    return user_names
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Discover and run consent-aware TeamTalk test operations."
@@ -171,10 +195,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="select every discovered channel for channel operations",
     )
     parser.add_argument(
+        "--user",
+        action="append",
+        metavar="NAME[,NAME...]",
+        help="private-message recipients by username; repeat or comma-separate. "
+        "Users are tracked by username for the whole run, so a recipient keeps "
+        "their message budget across a reconnect even when the server hands "
+        "out a fresh user ID",
+    )
+    parser.add_argument(
         "--user-id",
         action="append",
         metavar="ID[,ID...]|all",
-        help="private-message recipient IDs; use 'all' for every discovered user",
+        help="private-message recipient IDs; use 'all' for every discovered user. "
+        "Each ID is matched against the discovery roster once and tracked by "
+        "that user's username from then on (prefer --user: IDs change on every "
+        "login)",
     )
     parser.add_argument(
         "--channel-message",
@@ -265,12 +301,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def validate_args(args: argparse.Namespace) -> tuple[list[int], bool, bool]:
+def validate_args(
+    args: argparse.Namespace,
+) -> tuple[list[int], list[str], bool, bool]:
     if args.channel_path and args.channel_path.strip().casefold() == "all":
         args.channel_path = None
         args.all_channels = True
 
     user_ids, ids_request_all = parse_user_ids(args.user_id)
+    user_names = parse_user_names(args.user)
     all_users = bool(args.all_users or args.all_targets or ids_request_all)
     all_channels = bool(args.all_channels or args.all_targets)
 
@@ -282,6 +321,8 @@ def validate_args(args: argparse.Namespace) -> tuple[list[int], bool, bool]:
         raise TeamTalkConfigurationError("--join-leave-cycles cannot be negative")
     if args.interval < 0:
         raise TeamTalkConfigurationError("--interval cannot be negative")
+    if args.sweep_interval < 0:
+        raise TeamTalkConfigurationError("--sweep-interval cannot be negative")
 
     if args.channel_message is not None:
         args.channel_message = validate_test_message(
@@ -291,9 +332,9 @@ def validate_args(args: argparse.Namespace) -> tuple[list[int], bool, bool]:
         args.private_message = validate_test_message(
             args.private_message, "--private-message"
         )
-        if not user_ids and not all_users:
+        if not user_ids and not user_names and not all_users:
             raise TeamTalkConfigurationError(
-                "--private-message requires --user-id or --all-users"
+                "--private-message requires --user, --user-id, or --all-users"
             )
 
     channel_action = bool(
@@ -358,7 +399,7 @@ def validate_args(args: argparse.Namespace) -> tuple[list[int], bool, bool]:
         raise TeamTalkConfigurationError(
             "--confirm is required for channel or private test actions"
         )
-    return user_ids, all_users, all_channels
+    return user_ids, user_names, all_users, all_channels
 
 
 def normalize_channel_path(path: str) -> str:
@@ -406,30 +447,37 @@ def print_discovery(
     print(f"Discovered {len(users)} online user(s):")
     for user in users:
         location = f" — {user['channel_path']}" if user.get("channel_path") else ""
-        print(f"  user {user['id']}: {user['display_name']}{location}")
+        print(f"  {_user_display(user)}{location}")
 
 
 def run_login_logout_cycles(
     session: TeamTalkSession, cycles: int, interval: float
 ) -> bool:
-    """Run login/logout cycles.  Returns False if a kick could not be recovered."""
+    """Run exactly ``cycles`` login/logout cycles, even across kicks.
 
-    for index in range(cycles):
-        if kill_switch_triggered():
-            print("[kill-switch] stopping login/logout cycles.")
-            return False
+    Only completed cycles count.  An interrupted cycle is retried after the
+    reconnect — which has already logged the session back in, so the retry
+    consumes that login instead of adding a new one on top: the run performs
+    exactly ``cycles`` logins regardless of how often protection fires.
+    Returns False if a kick could not be recovered.
+    """
+
+    completed = 0
+    while completed < cycles:
         try:
             if not session.logged_in:
                 session.login()
-            print(f"Auth cycle {index + 1}/{cycles}: logged in.")
+            print(f"Auth cycle {completed + 1}/{cycles}: logged in.")
             session.logout()
-            print(f"Auth cycle {index + 1}/{cycles}: logged out.")
+            print(f"Auth cycle {completed + 1}/{cycles}: logged out.")
         except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
-            print(f"[kick-resistance] auth cycle {index + 1} interrupted: {exc}")
+            print(f"[kick-resistance] auth cycle {completed + 1} interrupted: {exc}")
             if not session.check_and_reconnect():
                 print("Could not reconnect; stopping login/logout cycles.")
                 return False
-        if index + 1 < cycles:
+            continue  # retry the same cycle; the counter does not move
+        completed += 1
+        if completed < cycles:
             pause(interval)
     return True
 
@@ -449,9 +497,6 @@ def run_channel_operations(
         return
 
     for channel in channels:
-        if kill_switch_triggered():
-            print("[kill-switch] stopping channel operations.")
-            return
         channel_id = int(channel["id"])
         channel_name = str(channel.get("path") or channel.get("name") or channel_id)
         password_required = bool(channel.get("password_required"))
@@ -459,60 +504,117 @@ def run_channel_operations(
             print(f"Channel {channel_name} requires a password; attempting configured credentials.")
         session.rejoin_channel_id = channel_id
         session.rejoin_channel_password = channel_password
-        for cycle in range(cycles):
+        # Only completed join/(message)/leave cycles count.  A kick retries the
+        # interrupted cycle after reconnecting, so the channel still sees
+        # exactly ``cycles`` join/leave pairs and ``message_count`` messages
+        # per joined cycle — protection never restarts or inflates the totals.
+        cycle = 0
+        attempts = 0
+        while cycle < cycles:
             try:
                 session.join_channel(channel_id, channel_password)
                 print(
                     f"Channel {channel_name}: joined cycle {cycle + 1}/{cycles}."
                 )
                 if channel_message is not None:
-                    for message_index in range(message_count):
-                        session.send_channel_message(channel_message, channel_id)
+                    # Only successful sends count; an interrupted send is
+                    # retried after reconnecting instead of being skipped.
+                    sent = 0
+                    misses = 0
+                    while sent < message_count:
+                        try:
+                            session.send_channel_message(channel_message, channel_id)
+                        except (
+                            TeamTalkError, TeamTalkConfigurationError, OSError
+                        ) as exc:
+                            print(f"[kick-resistance] {channel_name} send interrupted: {exc}")
+                            misses += 1
+                            if misses >= MAX_CONSECUTIVE_FAILURES:
+                                print(f"Too many failed sends to {channel_name}; stopping channel operations.")
+                                return
+                            if not session.check_and_reconnect():
+                                print("Could not reconnect; stopping channel operations.")
+                                return
+                            continue
+                        misses = 0
+                        sent += 1
                         print(
                             f"Channel {channel_name}: sent message "
-                            f"{message_index + 1}/{message_count}."
+                            f"{sent}/{message_count}."
                         )
-                        if message_index + 1 < message_count:
+                        if sent < message_count:
                             pause(interval)
                 session.leave_channel()
                 print(f"Channel {channel_name}: left cycle {cycle + 1}/{cycles}.")
             except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
                 print(f"[kick-resistance] {channel_name} cycle {cycle + 1} interrupted: {exc}")
+                attempts += 1
+                if attempts >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"Could not finish cycles in {channel_name}; moving on.")
+                    break
                 if not session.check_and_reconnect():
                     print("Could not reconnect; stopping channel operations.")
                     return
-            if cycle + 1 < cycles:
+                continue  # retry the same cycle; no messages were double-sent
+            attempts = 0
+            cycle += 1
+            if cycle < cycles:
                 pause(interval)
 
 
 def run_private_operations(
     session: TeamTalkSession,
-    user_ids: Sequence[int],
+    targets: Sequence[tuple[str, str]],
     *,
     message: str,
     message_count: int,
     interval: float,
 ) -> bool:
-    """Send private messages.  Returns False if a kick could not be recovered."""
+    """Send private messages.  Returns False if a kick could not be recovered.
 
+    ``targets`` are (username key, display) pairs.  Each target's current
+    server ID is looked up at send time — and looked up again after every
+    reconnect — so a relogged user is still found by username and the list is
+    never restarted: every target receives exactly ``message_count`` messages
+    in total.  An interrupted send is retried (against the fresh ID) rather
+    than counted.
+    """
+
+    misses = 0  # consecutive failed sends; bounds retry storms on a dead target
     for message_index in range(message_count):
-        if kill_switch_triggered():
-            print("[kill-switch] stopping private operations.")
-            return False
-        for recipient_index, user_id in enumerate(user_ids, start=1):
-            try:
-                session.send_private_message(message, int(user_id))
-            except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
-                print(f"[kick-resistance] private message interrupted: {exc}")
-                if not session.check_and_reconnect():
-                    print("Could not reconnect; stopping private operations.")
-                    return False
-                continue
-            print(
-                f"Private message {message_index + 1}/{message_count} "
-                f"to user {user_id} ({recipient_index}/{len(user_ids)} users)."
-            )
-            if recipient_index < len(user_ids) or message_index + 1 < message_count:
+        for recipient_index, (key, display) in enumerate(targets, start=1):
+            while True:
+                user_id = _lookup_user_id(session, key)
+                if user_id is None:
+                    print(
+                        f"Private message {message_index + 1}/{message_count}: "
+                        f"{display} is not online; skipping them this round."
+                    )
+                    break
+                try:
+                    session.send_private_message(message, user_id)
+                except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                    print(
+                        f"[kick-resistance] private message to {display} "
+                        f"interrupted: {exc}"
+                    )
+                    misses += 1
+                    if misses >= MAX_CONSECUTIVE_FAILURES:
+                        print("Too many failed sends in a row; stopping private operations.")
+                        return False
+                    if not session.check_and_reconnect():
+                        print("Could not reconnect; stopping private operations.")
+                        return False
+                    # Retry the same message against the re-resolved ID; the
+                    # counters do not move, so the run keeps its exact totals.
+                    continue
+                misses = 0
+                print(
+                    f"Private message {message_index + 1}/{message_count} "
+                    f"to {display} ({recipient_index}/{len(targets)} users)."
+                )
+                break
+            if recipient_index < len(targets) or message_index + 1 < message_count:
                 pause(interval)
     return True
 
@@ -523,6 +625,107 @@ def _bot_pause(interval: float, stop_event: threading.Event) -> bool:
     if interval <= 0:
         return stop_event.is_set()
     return stop_event.wait(interval)
+
+
+# --------------------------------------------------------------------------- #
+# User identity: usernames, not user IDs
+# --------------------------------------------------------------------------- #
+#
+# Server-assigned user IDs change every time someone logs in, so anything the
+# tools remember about a user (who has been messaged already, who a message is
+# for) must be keyed on the username.  After a kick or a relog the IDs are
+# stale, but the username still identifies the same person — this is what keeps
+# message totals exact instead of re-running the whole ID list.
+
+
+def _user_key(user: dict[str, Any]) -> str:
+    """Stable identity key for a user: casefolded username (never the ID).
+
+    Falls back to the nickname when the username is blank; only an anonymous
+    user with neither falls back to an ID-derived placeholder.
+    """
+
+    for field in ("username", "nickname"):
+        value = str(user.get(field) or "").strip()
+        if value:
+            return value.casefold()
+    return f"user-{int(user.get('id', -1))}"
+
+
+def _user_display(user: dict[str, Any]) -> str:
+    """Human-readable label combining nickname and @username."""
+
+    username = str(user.get("username") or "").strip()
+    display = str(
+        user.get("display_name") or user.get("nickname") or ""
+    ).strip()
+    if username and display and display.casefold() != username.casefold():
+        return f"{display} (@{username})"
+    if display:
+        return display
+    if username:
+        return f"@{username}"
+    return f"user {user.get('id')}"
+
+
+def _lookup_user_id(session: TeamTalkSession, key: str) -> Optional[int]:
+    """Resolve a username key to the user's *current* server-assigned ID.
+
+    Called at send time (and again after every reconnect) because the ID is
+    only valid for the user's current login; the username is not.
+    """
+
+    for user in session.list_users(include_self=True):
+        if _user_key(user) == key:
+            return int(user["id"])
+    return None
+
+
+def _select_targets(
+    users: Sequence[dict[str, Any]],
+    all_users: bool,
+    user_ids: Sequence[int],
+    user_names: Sequence[str] = (),
+) -> list[tuple[str, str]]:
+    """Build the (username key, display) target list from the discovery roster.
+
+    Explicitly requested names or IDs only select *which* users to target;
+    what the run then remembers and reports is each user's username — never
+    the server-assigned ID, which changes on every login.
+    """
+
+    wanted_ids = {int(user_id) for user_id in user_ids}
+    wanted_names = {
+        str(name).strip().casefold() for name in user_names if str(name).strip()
+    }
+    targets: list[tuple[str, str]] = []
+    matched_ids: set[int] = set()
+    matched_names: set[str] = set()
+    for user in users:
+        user_id = int(user["id"])
+        # A name selector may match the username or the nickname; both are
+        # stable identities, unlike the ID.
+        identity = {_user_key(user)}
+        nickname = str(user.get("nickname") or "").strip().casefold()
+        if nickname:
+            identity.add(nickname)
+        name_hits = wanted_names & identity
+        if all_users or user_id in wanted_ids or name_hits:
+            targets.append((_user_key(user), _user_display(user)))
+            matched_ids.add(user_id)
+            matched_names |= name_hits
+    if not all_users:
+        missing_ids = sorted(wanted_ids - matched_ids)
+        if missing_ids:
+            print(f"User ID(s) {missing_ids} are not online right now; skipping them.")
+        missing_names = sorted(wanted_names - matched_names)
+        if missing_names:
+            print(
+                "User(s) "
+                + ", ".join(repr(name) for name in missing_names)
+                + " are not online right now; skipping them."
+            )
+    return targets
 
 
 def _bot_config(base: Any, nickname: str) -> Any:
@@ -543,31 +746,50 @@ class _BotStop(Exception):
 
 def _send_to_user(
     session: TeamTalkSession,
-    user_id: int,
+    key: str,
     display_name: str,
     message: str,
     count: int,
     interval: float,
     stop_event: threading.Event,
 ) -> bool:
-    """Send ``count`` messages to one user.  Returns True if all sent."""
+    """Send exactly ``count`` messages to the user identified by username.
 
-    for message_index in range(count):
+    ``key`` is the casefolded username; the user's current ID is resolved for
+    every send (and re-resolved after each reconnect) because IDs change on
+    every login.  A kick mid-run re-sends only the interrupted message — the
+    delivered total stays exactly ``count``, never restarts at 1, never
+    exceeds it.  Returns True when all ``count`` messages were delivered.
+    """
+
+    sent = 0
+    misses = 0
+    while sent < count:
         if stop_event.is_set():
+            return False
+        user_id = _lookup_user_id(session, key)
+        if user_id is None:
+            print(
+                f"[user-bot] {display_name} is no longer online; "
+                f"dropping the {count - sent} message(s) left for them."
+            )
             return False
         try:
             session.send_private_message(message, user_id)
         except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
             print(f"[user-bot] send to {display_name} interrupted: {exc}")
+            misses += 1
+            if misses >= MAX_CONSECUTIVE_FAILURES:
+                print(f"[user-bot] giving up on {display_name} after {misses} failures.")
+                return False
             if not session.check_and_reconnect():
                 print("[user-bot] could not reconnect; stopping.")
                 raise _BotStop
-            return False
-        print(
-            f"[user-bot] messaged {display_name} (user {user_id}) "
-            f"{message_index + 1}/{count}."
-        )
-        if message_index + 1 < count and _bot_pause(interval, stop_event):
+            continue
+        misses = 0
+        sent += 1
+        print(f"[user-bot] messaged {display_name} ({sent}/{count}).")
+        if sent < count and _bot_pause(interval, stop_event):
             return False
     return True
 
@@ -675,7 +897,7 @@ def _merge_channel_roster(
 
 def _user_bot(
     base_config: Any,
-    user_ids: Sequence[int],
+    targets: Sequence[tuple[str, str]],
     all_users: bool,
     message: str,
     count: int,
@@ -686,21 +908,20 @@ def _user_bot(
     config = _bot_config(base_config, f"{base_config.nickname}-users")
 
     if not all_users:
-        # Finite mode: message the explicit user-ID list, ``count`` each.
+        # Finite mode: message the explicit target list, ``count`` each.  The
+        # targets are (username key, display) pairs — no user IDs are stored.
         with TeamTalkSession(config) as session:
-            for user_id in user_ids:
+            for key, display in targets:
                 if stop_event.is_set():
                     return
                 try:
                     sent_all = _send_to_user(
-                        session, int(user_id), str(user_id), message, count,
+                        session, key, display, message, count,
                         interval, stop_event,
                     )
                 except _BotStop:
                     return
                 if not sent_all:
-                    # Stopped, or a recoverable failure after a successful
-                    # reconnect: move on to the next user (no retry).
                     if stop_event.is_set():
                         return
                     continue
@@ -710,8 +931,9 @@ def _user_bot(
 
     # Continuous mode: keep re-discovering users and message any new joiner
     # that has not been messaged yet, until stopped.  Each new user receives
-    # ``count`` messages and is then recorded so a later sweep skips them.
-    messaged: set[int] = set()
+    # ``count`` messages and is then recorded BY USERNAME so a later sweep —
+    # or a kick-and-relog that hands them a fresh user ID — still skips them.
+    messaged: set[str] = set()
     sweep_interval = max(0.05, float(sweep_interval))
     with TeamTalkSession(config) as session:
         if _drain_login_events(session, stop_event, sweep_interval):
@@ -746,22 +968,22 @@ def _user_bot(
                 continue
             new_users = [
                 user for user in users
-                if int(user["id"]) not in messaged
+                if _user_key(user) not in messaged
             ]
             for user in new_users:
                 if stop_event.is_set():
                     return
-                user_id = int(user["id"])
-                display = str(user.get("display_name") or f"user {user_id}")
+                key = _user_key(user)
+                display = _user_display(user)
                 try:
                     sent_all = _send_to_user(
-                        session, user_id, display, message, count, interval,
+                        session, key, display, message, count, interval,
                         stop_event,
                     )
                 except _BotStop:
                     return
                 if sent_all:
-                    messaged.add(user_id)
+                    messaged.add(key)
 
 
 def _channel_bot(
@@ -794,7 +1016,14 @@ def _channel_bot(
                 )
             session.rejoin_channel_id = channel_id
             session.rejoin_channel_password = channel_password
-            for cycle in range(cycles):
+            # Only completed cycles count, and only delivered messages count:
+            # after a kick the bot retries the interrupted send/cycle instead
+            # of skipping it or restarting the numbering, so the channel gets
+            # exactly ``cycles`` join/leave pairs and ``count`` messages per
+            # joined cycle no matter how often protection fires.
+            cycle = 0
+            attempts = 0
+            while cycle < cycles:
                 if stop_event.is_set():
                     return
                 try:
@@ -806,23 +1035,32 @@ def _channel_bot(
                     f"[channel-bot] {channel_name}: joined cycle "
                     f"{cycle + 1}/{cycles}."
                 )
+                attempts = 0
                 if channel_message is not None:
-                    for message_index in range(count):
+                    sent = 0
+                    misses = 0
+                    while sent < count:
                         if stop_event.is_set():
                             return
                         try:
                             session.send_channel_message(channel_message, channel_id)
                         except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
                             print(f"[channel-bot] send interrupted: {exc}")
+                            misses += 1
+                            if misses >= MAX_CONSECUTIVE_FAILURES:
+                                print("[channel-bot] too many failed sends; stopping.")
+                                return
                             if not session.check_and_reconnect():
                                 print("[channel-bot] could not reconnect; stopping.")
                                 return
                             continue
+                        misses = 0
+                        sent += 1
                         print(
                             f"[channel-bot] {channel_name}: sent message "
-                            f"{message_index + 1}/{count}."
+                            f"{sent}/{count}."
                         )
-                        if message_index + 1 < count and _bot_pause(
+                        if sent < count and _bot_pause(
                             interval, stop_event
                         ):
                             return
@@ -830,15 +1068,20 @@ def _channel_bot(
                     session.leave_channel()
                 except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
                     print(f"[channel-bot] leave interrupted: {exc}")
+                    attempts += 1
+                    if attempts >= MAX_CONSECUTIVE_FAILURES:
+                        print("[channel-bot] too many interrupted cycles; stopping.")
+                        return
                     if not session.check_and_reconnect():
                         print("[channel-bot] could not reconnect; stopping.")
                         return
-                    continue
+                    continue  # retry the same cycle; messages were not double-sent
                 print(
                     f"[channel-bot] {channel_name}: left cycle "
                     f"{cycle + 1}/{cycles}."
                 )
-                if cycle + 1 < cycles and _bot_pause(interval, stop_event):
+                cycle += 1
+                if cycle < cycles and _bot_pause(interval, stop_event):
                     return
 
 
@@ -852,23 +1095,29 @@ def _churn_bot(
 ) -> None:
     config = _bot_config(base_config, f"{base_config.nickname}-churn-{index}")
     tag = f"[churn-bot {index}/{total}]"
-    # open() logs in, so the first cycle starts already authenticated.
+    # open() logs in, so the first cycle starts already authenticated.  Only
+    # completed cycles count: a kick retries the interrupted cycle after the
+    # reconnect (which has already logged the bot back in), so the bot performs
+    # exactly ``cycles`` logins in total — protection never adds extra ones.
     with TeamTalkSession(config) as session:
-        for i in range(cycles):
+        completed = 0
+        while completed < cycles:
             if stop_event.is_set():
                 return
             try:
-                if i:
+                if not session.logged_in:
                     session.login()
-                print(f"{tag} cycle {i + 1}/{cycles}: logged in.")
+                print(f"{tag} cycle {completed + 1}/{cycles}: logged in.")
                 session.logout()
-                print(f"{tag} cycle {i + 1}/{cycles}: logged out.")
+                print(f"{tag} cycle {completed + 1}/{cycles}: logged out.")
             except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
-                print(f"{tag} cycle {i + 1} interrupted: {exc}")
+                print(f"{tag} cycle {completed + 1} interrupted: {exc}")
                 if not session.check_and_reconnect():
                     print(f"{tag} could not reconnect; stopping.")
                     return
-            if i + 1 < cycles and _bot_pause(interval, stop_event):
+                continue  # retry the same cycle; the login counter does not move
+            completed += 1
+            if completed < cycles and _bot_pause(interval, stop_event):
                 return
 
 
@@ -877,7 +1126,8 @@ def _churn_bot(
 # ``stop_event`` is deliberately not part of the job: each worker creates its
 # own local event, so jobs stay picklable across process boundaries.
 #
-#   ("user", user_ids, all_users, message, count, interval, sweep_interval)
+#   ("user", targets, all_users, message, count, interval, sweep_interval)
+#          targets = [(username_key, display), ...] — usernames, never IDs
 #   ("channel", channels, channel_password, channel_message, count,
 #               join_leave_cycles, interval)
 #   ("churn", index, total, cycles, interval)
@@ -890,11 +1140,11 @@ def _spawn_bot_thread(
 
     kind = job[0]
     if kind == "user":
-        _, user_ids, all_users, message, count, interval, sweep_interval = job
+        _, targets, all_users, message, count, interval, sweep_interval = job
         return threading.Thread(
             target=_user_bot,
             args=(
-                config, user_ids, all_users, message, count, interval,
+                config, targets, all_users, message, count, interval,
                 sweep_interval, stop_event,
             ),
             daemon=True,
@@ -922,17 +1172,13 @@ def _spawn_bot_thread(
 def _worker_process(
     config: Any,
     jobs: Sequence[tuple[Any, ...]],
-    kill_event: Any,
     worker_index: int,
     worker_count: int,
 ) -> None:
     """Run one chunk of bot jobs in threads inside a child process.
 
     Each worker process stays under the native library's FD_SETSIZE ceiling by
-    running at most ``_max_concurrent_bots()`` bots.  A local kill-switch
-    watcher mirrors the process-local kill switch into the shared
-    ``kill_event`` so the parent can stop every other worker the moment any
-    bot receives the emergency-stop phrase.
+    running at most ``_max_concurrent_bots()`` bots.
     """
 
     # Line-buffer stdout so concurrent workers do not interleave mid-line.
@@ -945,16 +1191,6 @@ def _worker_process(
 
     stop_event = threading.Event()
     threads = [_spawn_bot_thread(config, job, stop_event) for job in jobs]
-
-    def _watcher() -> None:
-        while not stop_event.is_set():
-            if kill_switch_triggered():
-                kill_event.set()
-                stop_event.set()
-                return
-            stop_event.wait(0.25)
-
-    threading.Thread(target=_watcher, name="kill-switch-watcher", daemon=True).start()
 
     for thread in threads:
         thread.start()
@@ -995,6 +1231,7 @@ def _run_concurrent(
     config: Any,
     args: argparse.Namespace,
     user_ids: Sequence[int],
+    user_names: Sequence[str],
     all_users: bool,
     all_channels: bool,
 ) -> int:
@@ -1012,9 +1249,7 @@ def _run_concurrent(
             time.sleep(0.05)
     print_discovery(channels, users)
 
-    selected_users = (
-        [int(user["id"]) for user in users] if all_users else list(user_ids)
-    )
+    selected_users = _select_targets(users, all_users, user_ids, user_names)
     channel_action = bool(
         args.channel_message is not None or args.join_leave_cycles > 0
     )
@@ -1095,13 +1330,13 @@ def _run_concurrent(
         if per_user:
             # One bot per selected user: each opens its own SDK connection and
             # private-messages only its assigned user.  --all-users snapshots the
-            # currently online users (selected_users); it does not run the
-            # continuous new-joiner mode.
-            for user_id in selected_users:
+            # currently online users; it does not run the
+            # continuous new-joiner mode.  Targets travel as usernames.
+            for key, display in selected_users:
                 jobs.append(
                     (
                         "user",
-                        [int(user_id)],
+                        [(key, display)],
                         False,  # finite single-user mode
                         args.private_message,
                         args.message_count,
@@ -1160,22 +1395,6 @@ def _run_concurrent(
         stop_event = threading.Event()
         threads = [_spawn_bot_thread(config, job, stop_event) for job in jobs]
 
-        # A watcher that propagates the universal kill switch to the per-bot
-        # stop_event so all concurrent bots exit promptly when SW is received.
-        # It runs for the whole run and is deliberately not joined: it only exits
-        # once stop_event is set, and in a finite run nothing else sets it, so
-        # joining it would hang the suite after the bots finish.
-        def _kill_switch_watcher() -> None:
-            while not stop_event.is_set():
-                if kill_switch_triggered():
-                    stop_event.set()
-                    return
-                stop_event.wait(0.25)
-        watcher = threading.Thread(
-            target=_kill_switch_watcher, name="kill-switch-watcher", daemon=True
-        )
-        watcher.start()
-
         for thread in threads:
             thread.start()
         try:
@@ -1188,40 +1407,28 @@ def _run_concurrent(
                 thread.join(timeout=5.0)
             print("Stopped.")
             return 130
-        stop_event.set()  # let the kill-switch watcher exit
         print("Finished concurrent TeamTalk suite.")
         return 0
 
     # Too many bots for one process: split the jobs into chunks that each fit
     # under the FD_SETSIZE ceiling and run each chunk in its own worker
-    # process.  The parent supervises the workers and stops them all the moment
-    # any bot triggers the kill switch.
+    # process.
     chunks = [jobs[i:i + max_bots] for i in range(0, len(jobs), max_bots)]
     print(
         f"Splitting {total_bots} bots across {len(chunks)} worker process(es) "
         f"(up to {max_bots} each)."
     )
 
-    kill_event = multiprocessing.Event()
     processes: list[multiprocessing.Process] = []
     for idx, chunk in enumerate(chunks, start=1):
         process = multiprocessing.Process(
             target=_worker_process,
-            args=(config, chunk, kill_event, idx, len(chunks)),
+            args=(config, chunk, idx, len(chunks)),
             name=f"tt-suite-worker-{idx}",
             daemon=True,
         )
         processes.append(process)
         process.start()
-
-    # Stop every worker as soon as the kill switch fires in any of them.
-    def _kill_monitor() -> None:
-        kill_event.wait()
-        for process in processes:
-            if process.is_alive():
-                process.terminate()
-    monitor = threading.Thread(target=_kill_monitor, name="kill-monitor", daemon=True)
-    monitor.start()
 
     try:
         for process in processes:
@@ -1235,10 +1442,6 @@ def _run_concurrent(
         print("Stopped.")
         return 130
 
-    if kill_event.is_set():
-        print("[kill-switch] shutting down all workers.")
-        return 0
-
     for process in processes:
         if process.exitcode not in (0, None):
             print(f"worker {process.name} exited with code {process.exitcode}.")
@@ -1249,11 +1452,13 @@ def _run_concurrent(
 
 
 def execute(config: Any, args: argparse.Namespace) -> int:
-    user_ids, all_users, all_channels = validate_args(args)
+    user_ids, user_names, all_users, all_channels = validate_args(args)
     ensure_server_allowed(config.host, args.whitelist)
 
     if args.concurrent:
-        return _run_concurrent(config, args, user_ids, all_users, all_channels)
+        return _run_concurrent(
+            config, args, user_ids, user_names, all_users, all_channels
+        )
 
     # Discover without automatically joining the configured channel.  Channel
     # targets are joined explicitly after the complete inventory is known.
@@ -1269,9 +1474,7 @@ def execute(config: Any, args: argparse.Namespace) -> int:
             time.sleep(0.05)
         print_discovery(channels, users)
 
-        selected_users = (
-            [int(user["id"]) for user in users] if all_users else list(user_ids)
-        )
+        selected_users = _select_targets(users, all_users, user_ids, user_names)
         channel_action = bool(
             args.channel_message is not None or args.join_leave_cycles > 0
         )
@@ -1298,12 +1501,16 @@ def execute(config: Any, args: argparse.Namespace) -> int:
                 return 1
 
         needs_operations = bool(selected_channels or args.private_message is not None)
+        # Log back in BEFORE probing online status: after --login-cycles the
+        # session is deliberately logged out but still connected, and
+        # is_online() reports False for a logged-out client, so probing first
+        # would wrongly abort every run that combines cycles with operations.
+        if needs_operations and not session.logged_in and session.connected:
+            session.login()
+            print("Logged back in for requested test operations.")
         if needs_operations and not session.is_online():
             print("Session is offline; cannot continue channel/private operations.")
             return 1
-        if needs_operations and not session.logged_in:
-            session.login()
-            print("Logged back in for requested test operations.")
 
         if selected_channels:
             run_channel_operations(
@@ -1361,8 +1568,13 @@ def interactive_run() -> int:
     )
     all_users = prompt_yes_no("Use all discovered online users?", False)
     user_text = "" if all_users else prompt_text(
-        "Private user IDs (comma-separated, or all; blank to skip)", None
+        "Private message recipients (usernames, comma-separated; "
+        "or all; blank to skip)",
+        None,
     )
+    if user_text and user_text.strip().casefold() == "all":
+        all_users = True
+        user_text = ""
     channel_message = prompt_text("Channel test message (blank to skip)", None)
     private_message = prompt_text("Private test message (blank to skip)", None)
     login_cycles = prompt_int(
@@ -1421,7 +1633,8 @@ def interactive_run() -> int:
         all_targets=False,
         all_users=all_users,
         all_channels=all_channels,
-        user_id=[user_text] if user_text else None,
+        user=[user_text] if user_text else None,
+        user_id=None,
         channel_message=channel_message or None,
         private_message=private_message or None,
         message_count=message_count,

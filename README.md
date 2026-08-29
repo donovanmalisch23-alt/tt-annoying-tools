@@ -211,10 +211,9 @@ file-descriptor limit (roughly `(1024 − 16) / 4 ≈ 252` bots on a typical Lin
 box). When you ask for more than that, the suite **splits the bots across
 multiple worker processes** — each running up to the ceiling — and supervises
 them from the parent, so a request for 1000 churn-bots becomes four workers of
-~252 bots each instead of a core dump. The universal kill switch still stops
-every worker: the moment any bot receives the emergency-stop phrase, the parent
-terminates all of them. Raising the process's descriptor limit (`ulimit -n`)
-raises the per-worker ceiling and therefore reduces the number of workers.
+~252 bots each instead of a core dump. Raising the process's descriptor limit
+(`ulimit -n`) raises the per-worker ceiling and therefore reduces the number
+of workers.
 
 ### One bot per channel / one bot per user
 
@@ -232,7 +231,7 @@ connection**:
 
 ```bash
 # One channel-bot per channel and one user-bot per user (3 users, 4 channels):
-python3 tt_suite.py --concurrent --bot-per-channel --bot-per-user   --all-channels --user-id 101,102,103   --channel-message 'channel test' --private-message 'private test'   --message-count 1 --join-leave-cycles 1 --confirm
+python3 tt_suite.py --concurrent --bot-per-channel --bot-per-user   --all-channels --user amy,bob,carol   --channel-message 'channel test' --private-message 'private test'   --message-count 1 --join-leave-cycles 1 --confirm
 
 # Preview the per-target bot plan without sending:
 python3 tt_suite.py --dry-run --concurrent --bot-per-channel --bot-per-user   --all-channels --all-users --channel-message 'hi' --private-message 'hi'
@@ -271,36 +270,6 @@ Continuous mode only changes the user-bot. The `--channel-message` bot and any
 `--churn-bots` still terminate after their finite counts as usual, so the run
 ends when you interrupt the user-bot and those bots have finished.
 
-### Universal kill switch (all tools)
-
-Every tool monitors the SDK event queue for an emergency stop: if it receives a
-**private (user-to-user) message whose body is `SW`** (case-insensitive, after
-stripping whitespace), the tool **shuts down completely**. Any connected user
-can trigger it — it is independent of the whitelist/allowlist, because it is an
-emergency stop. Channel messages are ignored, and the match is exact (a message
-like `SW now` does not trigger it).
-
-The shutdown is a hard cut. A single background thread per connection drains the
-SDK event queue every 0.5s (set ``TT_KILL_SWITCH_SCAN_MS``) and is the sole
-``getMessage`` consumer, so the scan runs continuously regardless of what the bot
-is doing — including while it is idle or sleeping. The instant a matching
-private message is seen the process calls ``exit(0)`` immediately; it does not
-wait for the current operation to finish.
-
-Customize or disable it:
-
-```bash
-# default on, phrase "SW":
-python3 tt_suite.py --concurrent --all-users --private-message 'hi' --confirm
-
-# custom phrase via env:
-TT_KILL_SWITCH_PHRASE=STOP python3 tt_spammer.py --cycles 1000 --confirm
-
-# disable the kill switch:
-python3 tt_suite.py --concurrent --no-kill-switch --private-message 'hi' --confirm
-# or: TT_KILL_SWITCH=0
-```
-
 ### Kick resistance (all tools)
 
 Every tool reconnects and resumes after a kick or disconnect. When a bot loses
@@ -323,6 +292,40 @@ down its internal threads asynchronously, and exiting immediately could
 segfault the process while they were still winding down. Set the variable to
 `0` to skip the wait if you do not need it.
 
+**Protection keeps the counts exact.** When server flood protection kicks in
+mid-run, the interrupted operation — the one message, login cycle, or
+leave/join pair that was in flight — is retried after the reconnect, and only
+operations that actually completed count toward the total. The numbering never
+restarts and no operation is ever sent twice, so the server sees exactly the
+number of messages, login attempts, and cycles you asked for: `--message-count
+3 --cycles 5` is always 3 delivered messages and 5 completed cycles, no matter
+how often protection fires in between. Retries are bounded (three consecutive
+failures against the same target give up cleanly) so a permanently unreachable
+target cannot turn into a reconnect/retry storm against the server.
+
+### Users are tracked by username, not user ID
+
+Server-assigned user IDs change on every login, so every tool keys what it
+remembers about a person on their **username** instead:
+
+- Select private-message recipients with `--user amy,bob` (repeat the flag or
+  comma-separate) in `tt_suite.py` and `tt_message_spammer.py`, and allowlist
+  response-bot users with `--allow-user amy` in `ttbot_the_offender.py`.
+  Matching is case-insensitive and also accepts a user's nickname.
+- The legacy `--user-id` / `--allow-user-id` flags still work: each ID is
+  resolved to that user's username once, against the discovery roster, and the
+  run tracks the name from then on. `--user-id all` still selects every
+  discovered user. Prefer the name flags — an ID only identifies a login
+  session, not a person.
+- A recipient's current ID is looked up by username at every send (and again
+  after every reconnect), so a user who relogged mid-run still receives their
+  remaining messages — and only their remaining ones.
+- The response bot's allowlist and per-user cooldown also key on the username,
+  so someone cannot dodge their cooldown by reconnecting, and an allowlisted
+  user stays allowlisted across a relog.
+- Discovery prints users by name (`Amy — /Lobby`, or `Bobby (@bobby)` when the
+  nickname differs from the username), never as bare IDs.
+
 The combined runner reads an exact, one-host-per-line allowlist from
 `whitelist.txt` before it connects. Copy `whitelist.txt.example` to
 `whitelist.txt` and add only servers that are approved for testing. Use
@@ -336,8 +339,9 @@ one-second delay between messages. The message tool accepts any positive send
 count and its interactive private-message picker can select up to 20 users per
 run. Login/logout and leave/join tools also accept any positive cycle count.
 The response bot requires
-an explicit allowlist or `--allow-all`, responds only to `!hello` by default,
-applies a per-user cooldown, and stops after 100 replies unless configured
+an explicit allowlist (`--allow-user` by username, or `--allow-user-id`) or
+`--allow-all`, responds only to `!hello` by default, applies a per-user
+cooldown keyed on the username, and stops after 100 replies unless configured
 otherwise.
 
 Run `python3 <program> --help` for all connection, channel, and SDK options.
