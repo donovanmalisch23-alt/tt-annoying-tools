@@ -18,3 +18,7 @@ env/
 # PyInstaller build output (download artifacts from CI instead).
 build/
 dist/
+
+# Local terminal-session captures and shell prompt state (not source).
+typescript
+.change-ip-state

@@ -139,6 +139,8 @@ All of these are ordinary Python 3 programs and call TeamTalk directly:
 | `tt_leave_join_spammer.py` | Run a configurable channel leave/join test. |
 | `ttbot_the_offender.py` | Run the safe trigger-based response bot described above. |
 | `tt_suite.py` | Discover channels/users and run consent-aware combined tests, including an optional concurrent multi-bot mode. |
+| `tt_loic.py` | LOIC-style TCP/UDP flood modes against a TeamTalk server on this machine, with before/during/after service probes. |
+| `tt_ramp.py` | Ramped breaking-point capacity test: steps the `tt_loic` flood in geometric stages and classifies each as healthy / degraded / broken, stopping at the first break. |
 
 Hyphenated filename-compatible launchers are also provided as
 `tt-message-spammer.py`, `tt-leave-join-spammer.py`, and
@@ -330,6 +332,72 @@ remembers about a person on their **username** instead:
   user stays allowlisted across a relog.
 - Discovery prints users by name (`Amy — /Lobby`, or `Bobby (@bobby)` when the
   nickname differs from the username), never as bare IDs.
+
+### LOIC-style flood test (this machine only)
+
+`tt_loic.py` reproduces LOIC's two flood modes — a TCP junk-data flood and a
+UDP junk-datagram flood — as a plain CLI (LOIC itself is a Windows GUI app,
+unusable with a screen reader), then measures what the flood actually does to
+a TeamTalk server: connection latency, login, and message round-trips before,
+during, and after the flood, with a plain-language verdict.
+
+It is **local-only by construction**: the target must resolve to an address on
+this machine (loopback or one of its own interfaces) — anything else is
+refused — the flood length is capped at 60 seconds, and `--confirm` is
+required. Point it only at a server you run on this machine, such as the
+localhost server shipped with the `tt5-loadtest` project.
+
+```bash
+# 10 s of TCP+UDP junk against the local server, 8 threads per mode,
+# probing service impact throughout (needs the local server running):
+python3 tt_loic.py --confirm
+
+# UDP only, 16 threads, 30 s, no SDK probes:
+python3 tt_loic.py --mode udp --threads 16 --duration 30 --no-probe --confirm
+```
+
+The probe logs in with `--probe-username`/`--probe-password` (default
+`loadtest`/`loadtest`, the local server's test account) and measures a fresh
+TCP connect plus a message round trip per probe (a TeamTalk server relays a
+channel message to the other users in the channel, never back to its sender,
+so the probe logs in twice: a sender and a receiver). If the flood
+knocks the probe out, that is reported as a finding, not hidden. If the
+configured `--probe-channel` does not exist on the server, the probe says so
+and measures from the root channel instead, which every TeamTalk server has.
+
+### Ramped breaking-point test (this machine only)
+
+`tt_ramp.py` builds on the `tt_loic` flood to find where a local TeamTalk
+server actually stops coping. It ramps the flood in geometric stages
+(1 → 2 → 4 → 8 → … threads by default, tunable with `--start-threads`,
+`--ramp-factor`, and `--max-threads`), and at each stage runs the same
+sender+receiver service probe to classify the stage as **healthy**,
+**degraded** (round-trip ≥ 2× baseline, or any probe failed), or **broken**
+(zero probes succeeded). It stops at the first broken stage and prints a
+plain-language summary: "BREAKS at N threads", where degradation first
+starts, and the highest load that still held cleanly.
+
+It inherits every `tt_loic` safety gate — local-only target, `--confirm`
+required, `--dry-run` to preview the stage plan — and reuses the
+`whitelist.txt` gate from `tt_suite`. Its own thread ceiling
+(`--max-threads`, default 64, max 1024) is independent of `tt_loic`'s
+64-thread cap, so the two tools do not interfere.
+
+```bash
+# Preview the stage plan without flooding:
+python3 tt_ramp.py --confirm --dry-run
+
+# Ramp 1 → 64 threads, 10 s per stage (needs the local server running):
+python3 tt_ramp.py --host 127.0.0.1 --confirm
+
+# Soak: ramp 64 → 1024 threads, 60 s per stage, to find the real ceiling:
+python3 tt_ramp.py --host 127.0.0.1 --confirm --start-threads 64 \
+  --ramp-factor 2 --max-threads 1024 --stage-duration 60
+```
+
+Use the breaking point it reports to size server hardening: the accept
+backlog / `somaxconn`, per-IP connection-rate limiting, and a
+max-connections cap.
 
 The combined runner reads an exact, one-host-per-line allowlist from
 `whitelist.txt` before it connects. Copy `whitelist.txt.example` to
