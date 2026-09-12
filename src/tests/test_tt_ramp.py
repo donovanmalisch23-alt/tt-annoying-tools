@@ -31,6 +31,7 @@ def namespace(**overrides):
         stage_durations=None,
         simultaneous=False,
         max_total_time=None,
+        total_time=None,
         start_threads=1,
         ramp_factor=2.0,
         max_threads=64,
@@ -101,6 +102,20 @@ class TestValidateArgs:
     def test_max_total_time_ok(self):
         tt_ramp.validate_args(namespace(max_total_time=90.0))
 
+    def test_total_time_must_be_positive(self):
+        with pytest.raises(TeamTalkConfigurationError, match="--total-time"):
+            tt_ramp.validate_args(namespace(total_time=0.0))
+
+    def test_total_time_ok(self):
+        tt_ramp.validate_args(namespace(total_time=120.0))
+
+    def test_total_time_refuses_stage_durations(self):
+        # The frame replaces the per-stage lengths; giving both is a mistake.
+        with pytest.raises(TeamTalkConfigurationError, match="mutually exclusive"):
+            tt_ramp.validate_args(
+                namespace(total_time=120.0, stage_durations=[5.0, 10.0])
+            )
+
     def test_start_exceeding_max_refused(self):
         with pytest.raises(TeamTalkConfigurationError, match="start-threads"):
             tt_ramp.validate_args(namespace(start_threads=8, max_threads=4))
@@ -155,6 +170,54 @@ class TestBuildStages:
             namespace(stage_durations=[1.0, 2.0, 3.0], max_threads=4)
         )
         assert [s.duration for s in stages] == [1.0, 2.0, 3.0]
+
+    def test_total_time_splits_evenly_across_sequential_stages(self):
+        # A 70 s frame over the default 7 stages: 10 s each, summing to 70.
+        stages = tt_ramp.build_stages(namespace(total_time=70.0))
+        assert len(stages) == 7
+        assert all(s.duration == 10.0 for s in stages)
+
+    def test_total_time_overrides_stage_duration(self):
+        # --stage-duration is the default, not a floor: the frame wins.
+        stages = tt_ramp.build_stages(namespace(total_time=70.0, stage_duration=30.0))
+        assert all(s.duration == 10.0 for s in stages)
+
+    def test_total_time_runs_the_full_frame_in_simultaneous_mode(self):
+        # All stages flood at once, so the run lasts the frame exactly:
+        # every stage gets the full frame as its duration.
+        stages = tt_ramp.build_stages(
+            namespace(total_time=30.0, simultaneous=True)
+        )
+        assert len(stages) == 7
+        assert all(s.duration == 30.0 for s in stages)
+
+    def test_total_time_below_per_stage_bound_refused(self):
+        # 3 s across 7 stages is under 1 s per stage: outside the bound.
+        with pytest.raises(TeamTalkConfigurationError, match="--total-time"):
+            tt_ramp.build_stages(namespace(total_time=3.0))
+
+    def test_total_time_above_per_stage_bound_refused_sequential(self):
+        # 700 s across 7 stages is 100 s each: over the 60 s per-stage cap.
+        with pytest.raises(
+            TeamTalkConfigurationError, match="per-stage bound"
+        ):
+            tt_ramp.build_stages(namespace(total_time=700.0))
+
+    def test_total_time_above_per_stage_bound_refused_simultaneous(self):
+        # Simultaneous stages each run the full frame, so the frame itself
+        # cannot exceed the 60 s per-stage bound.
+        with pytest.raises(
+            TeamTalkConfigurationError, match="simultaneous frame cannot exceed"
+        ):
+            tt_ramp.build_stages(namespace(total_time=61.0, simultaneous=True))
+
+    def test_total_time_fits_when_fewer_stages(self):
+        # Fewer stages (bigger start) mean a long frame still fits the bound.
+        stages = tt_ramp.build_stages(
+            namespace(total_time=120.0, start_threads=60, max_threads=64)
+        )
+        assert [s.threads for s in stages] == [60, 64]
+        assert all(s.duration == 60.0 for s in stages)
 
 
 class TestParseStageDurations:
@@ -291,6 +354,30 @@ class TestDryRun:
         rc = tt_ramp.run(namespace(host="127.0.0.1", dry_run=True, confirm=True))
         assert rc == 0
         assert called["n"] == 0
+
+    def test_dry_run_shows_the_time_frame(self, capsys):
+        # The frame is part of the plan, and the stages show it split.
+        rc = tt_ramp.run(
+            namespace(host="127.0.0.1", dry_run=True, confirm=True, total_time=70.0)
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "time frame  : 70s (stages sized to fill it)" in out
+        assert "10s" in out  # 70 s across 7 stages
+
+    def test_dry_run_without_total_time_has_no_frame_line(self, capsys):
+        rc = tt_ramp.run(namespace(host="127.0.0.1", dry_run=True, confirm=True))
+        assert "time frame" not in capsys.readouterr().out
+
+    def test_total_time_env_var_sets_the_flag_default(self, monkeypatch, capsys):
+        monkeypatch.setenv("TT_RAMP_TOTAL_TIME", "70")
+        args = tt_ramp.build_parser().parse_args([])
+        assert args.total_time == 70.0
+
+        rc = tt_ramp.run(
+            namespace(host="127.0.0.1", dry_run=True, confirm=True, total_time=args.total_time)
+        )
+        assert "time frame  : 70s" in capsys.readouterr().out
 
 
 class TestRunStage:
@@ -486,6 +573,9 @@ class TestInteractiveRun:
             lambda **_: self._config(username="probe", password="secret"),
         )
         monkeypatch.setattr(
+            tt_ramp, "prompt_float", lambda label, default, **_: 0.0
+        )
+        monkeypatch.setattr(
             tt_ramp, "prompt_yes_no", lambda label, default: True
         )
         monkeypatch.setattr(tt_ramp, "run", fake_run)
@@ -502,10 +592,56 @@ class TestInteractiveRun:
         assert args.dry_run is False
         assert args.max_threads == tt_ramp.DEFAULT_MAX_THREADS
         assert args.stage_duration == tt_ramp.DEFAULT_STAGE_DURATION
+        # A 0 frame answer keeps the default per-stage plan.
+        assert args.total_time is None
+
+    def test_frame_answer_sets_the_total_time(self, monkeypatch):
+        captured = {}
+
+        def fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(
+            tt_ramp, "prompt_connection_config", lambda **_: self._config()
+        )
+        monkeypatch.setattr(
+            tt_ramp, "prompt_float", lambda label, default, **_: 70.0
+        )
+        monkeypatch.setattr(
+            tt_ramp, "prompt_yes_no", lambda label, default: True
+        )
+        monkeypatch.setattr(tt_ramp, "run", fake_run)
+        assert tt_ramp.interactive_run() == 0
+        # The "how long should the test run" answer is the run's frame.
+        assert captured["args"].total_time == 70.0
+
+    def test_frame_prompt_is_bounded_by_the_stage_plan(self, monkeypatch):
+        # The interactive plan is the fixed 7-stage ramp, so the frame can
+        # never ask for more than 7 x 60 s.
+        seen = {}
+
+        def fake_prompt(label, default, **kwargs):
+            seen.update(kwargs, label=label)
+            return 0.0
+
+        monkeypatch.setattr(
+            tt_ramp, "prompt_connection_config", lambda **_: self._config()
+        )
+        monkeypatch.setattr(tt_ramp, "prompt_float", fake_prompt)
+        monkeypatch.setattr(
+            tt_ramp, "prompt_yes_no", lambda label, default: False
+        )
+        assert tt_ramp.interactive_run() == 0
+        assert seen["maximum"] == tt_ramp.MAX_DURATION_SECONDS * 7
+        assert "How long would you like the test to run for" in seen["label"]
 
     def test_declined_go_no_go_cancels_without_running(self, monkeypatch, capsys):
         monkeypatch.setattr(
             tt_ramp, "prompt_connection_config", lambda **_: self._config()
+        )
+        monkeypatch.setattr(
+            tt_ramp, "prompt_float", lambda label, default, **_: 0.0
         )
         monkeypatch.setattr(
             tt_ramp, "prompt_yes_no", lambda label, default: False
@@ -543,6 +679,9 @@ class TestInteractiveRun:
             return False  # decline; reaching the prompt is what's under test
 
         monkeypatch.setattr(tt_ramp, "prompt_yes_no", fake_yes_no)
+        monkeypatch.setattr(
+            tt_ramp, "prompt_float", lambda label, default, **_: 0.0
+        )
         monkeypatch.setattr(
             tt_ramp, "run", lambda args: pytest.fail("declined run must not start")
         )

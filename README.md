@@ -121,7 +121,7 @@ All of these are ordinary Python 3 programs and call TeamTalk directly:
 | `ttbot_the_offender.py` | Run the safe trigger-based response bot described above. |
 | `tt_suite.py` | Discover channels/users and run consent-aware combined tests, including an optional concurrent multi-bot mode. |
 | `tt_loic.py` | LOIC-style TCP/UDP flood modes against a TeamTalk server on this machine, with before/during/after service probes. |
-| `tt_ramp.py` | Ramped breaking-point capacity test: steps the `tt_loic` flood in geometric stages and classifies each as healthy / degraded / broken, stopping at the first break. Per-stage durations (`--stage-durations`), all-stages-at-once (`--simultaneous`), and a whole-run wall-clock cap (`--max-total-time`) are supported. |
+| `tt_ramp.py` | Ramped breaking-point capacity test: steps the `tt_loic` flood in geometric stages and classifies each as healthy / degraded / broken, stopping at the first break. Per-stage durations (`--stage-durations`), all-stages-at-once (`--simultaneous`), a fixed whole-ramp time frame (`--total-time`), and a wall-clock cap (`--max-total-time`) are supported. |
 
 Running a tool with no arguments opens prompts, just like the original tools:
 
@@ -372,10 +372,12 @@ is this machine. Its own thread ceiling
 64-thread cap, so the two tools do not interfere. Running it with no
 arguments opens the same prompts as every other tool — server host, TCP port,
 UDP port, account; Enter accepts the `teamtalk.env` defaults — then applies
-the whitelist check and asks one go/no-go question that
+the whitelist check, asks how long you would like the test to run for in
+total (0 keeps the default per-stage plan; any other number is the frame
+the stages are sized to fill), and asks one go/no-go question that
 defaults to No before the ramp starts.
 
-The schedule is tunable three ways (each also has an environment variable,
+The schedule is tunable four ways (each also has an environment variable,
 so a ramp can be configured without flags):
 
 - `--stage-durations 5,10,20` — give each stage its own flood length.
@@ -385,6 +387,12 @@ so a ramp can be configured without flags):
   after another: all stages start together, each stops after its own
   duration, and the server sees the combined load (the sum of all stage
   threads) at once.
+- `--total-time 70` — a fixed time frame for the whole ramp: sequential
+  stages split it evenly (70 s over the default 7 stages is 10 s each), so
+  the run fills the frame exactly, and with `--simultaneous` every stage
+  runs the full frame. It replaces `--stage-duration`/`--stage-durations`
+  and is refused if a stage would fall outside the 1–60 s per-stage bound
+  (fix it by changing the frame or the stage count).
 - `--max-total-time 90` — a hard wall-clock cap for the whole ramp. When
   it expires, every flood stops and the ramp reports the results collected
   so far.
@@ -409,7 +417,12 @@ python3 tt_ramp.py --host 127.0.0.1 --confirm --stage-durations 5,10,20
 # All stages flood at the same time, whole run capped at 90 s:
 python3 tt_ramp.py --host 127.0.0.1 --confirm --simultaneous --max-total-time 90
 
+# Fixed frame: the whole ramp auto-sizes to fill exactly 70 s (10 s a stage):
+python3 tt_ramp.py --host 127.0.0.1 --confirm --total-time 70
+
 # Same thing, configured through the environment instead of flags:
+TT_RAMP_STAGE_DURATIONS=5,10,20 TT_RAMP_SIMULTANEOUS=1 \
+  TT_RAMP_MAX_TOTAL_TIME=90 python3 tt_ramp.py --host 127.0.0.1 --confirm
 TT_RAMP_STAGE_DURATIONS=5,10,20 TT_RAMP_SIMULTANEOUS=1 \
   TT_RAMP_MAX_TOTAL_TIME=90 python3 tt_ramp.py --host 127.0.0.1 --confirm
 ```

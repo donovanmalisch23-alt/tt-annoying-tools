@@ -22,8 +22,12 @@ maximum 1024).  Each stage can also carry its own flood length with
 ``--simultaneous`` floods every stage at the same time instead of one after
 another, and ``--max-total-time`` caps the whole run's wall clock: when the
 cap expires every flood stops and the run reports the results collected so
-far.  All three also read ``TT_RAMP_STAGE_DURATIONS``,
-``TT_RAMP_SIMULTANEOUS``, and ``TT_RAMP_MAX_TOTAL_TIME`` so a ramp can be
+far.  ``--total-time`` instead fixes the frame the ramp is planned into:
+sequential stages split it evenly so the whole run lasts it exactly, and
+with ``--simultaneous`` every stage runs the full frame; the interactive
+path asks for it directly ("How long would you like the test to run for?").
+All four also read ``TT_RAMP_STAGE_DURATIONS``, ``TT_RAMP_SIMULTANEOUS``,
+``TT_RAMP_MAX_TOTAL_TIME``, and ``TT_RAMP_TOTAL_TIME`` so a ramp can be
 configured without flags.
 
 Running with no arguments opens the same interactive prompts as the rest of
@@ -57,6 +61,7 @@ from tt_teamtalk import (
     comma_int,
     print_tool_error,
     prompt_connection_config,
+    prompt_float,
     prompt_yes_no,
 )
 
@@ -228,6 +233,16 @@ def build_parser() -> argparse.ArgumentParser:
         "(env: TT_RAMP_MAX_TOTAL_TIME)",
     )
     parser.add_argument(
+        "--total-time", type=float,
+        default=_env_positive_float("TT_RAMP_TOTAL_TIME"),
+        metavar="SECONDS",
+        help="fixed time frame for the whole ramp: sequential stages split it "
+        "evenly (frame / stage count) so the run fills it exactly, and with "
+        "--simultaneous every stage runs the full frame; each stage still "
+        "obeys the per-stage bound, and --stage-duration/--stage-durations "
+        "are ignored while it is set (env: TT_RAMP_TOTAL_TIME)",
+    )
+    parser.add_argument(
         "--start-threads", type=comma_int, default=DEFAULT_START_THREADS,
         help=f"thread count for the first stage, 1-{RAMP_MAX_THREADS} "
         f"(default: {DEFAULT_START_THREADS})",
@@ -299,6 +314,16 @@ def validate_args(args: argparse.Namespace) -> None:
         raise TeamTalkConfigurationError(
             "--max-total-time must be at least 1 second"
         )
+    if args.total_time is not None:
+        if args.total_time < 1:
+            raise TeamTalkConfigurationError(
+                "--total-time must be at least 1 second"
+            )
+        if args.stage_durations:
+            raise TeamTalkConfigurationError(
+                "--total-time and --stage-durations are mutually exclusive: "
+                "the frame replaces the per-stage lengths"
+            )
     if not 1 <= args.start_threads <= RAMP_MAX_THREADS:
         raise TeamTalkConfigurationError(
             f"--start-threads must be between 1 and {RAMP_MAX_THREADS}"
@@ -350,7 +375,10 @@ def build_stages(args: argparse.Namespace) -> list[RampStage]:
 
     Stage durations come from ``--stage-durations`` when given — the first
     entry is stage 1's length, and the last entry repeats for any further
-    stages — and from ``--stage-duration`` otherwise.
+    stages — and from ``--stage-duration`` otherwise.  ``--total-time``
+    replaces both: sequential stages split the frame evenly so the whole
+    ramp's flood time fills it, and simultaneous stages each run the full
+    frame (they start together, so the run lasts exactly it).
     """
     stages: list[RampStage] = []
     durations = args.stage_durations or []
@@ -368,6 +396,25 @@ def build_stages(args: argparse.Namespace) -> list[RampStage]:
             break
         # Grow by the factor; round up so a factor of 1.5 still advances.
         threads = max(threads + 1, int(round(threads * args.ramp_factor)))
+    if args.total_time is not None:
+        per_stage = (
+            args.total_time if args.simultaneous
+            else args.total_time / len(stages)
+        )
+        for stage in stages:
+            if not 1 <= per_stage <= MAX_DURATION_SECONDS:
+                hint = (
+                    "a simultaneous frame cannot exceed the per-stage bound"
+                    if args.simultaneous else
+                    "give the ramp fewer stages (raise --ramp-factor or "
+                    "--start-threads) or a larger frame"
+                )
+                raise TeamTalkConfigurationError(
+                    f"--total-time {args.total_time:g}s gives each of "
+                    f"{len(stages)} stage(s) {per_stage:g}s, outside the "
+                    f"1-{int(MAX_DURATION_SECONDS)}s per-stage bound ({hint})"
+                )
+            stage.duration = per_stage
     return stages
 
 
@@ -656,11 +703,18 @@ def _dry_run_plan(args: argparse.Namespace, stages: list[RampStage]) -> str:
     max_time = (
         f"{args.max_total_time:g}s (hard stop)" if args.max_total_time else "uncapped"
     )
+    frame = (
+        f"{args.total_time:g}s (stages sized to fill it)" if args.total_time else None
+    )
     lines = [
         "tt_ramp dry run — nothing will be flooded. Planned stages:",
         f"  target      : {args.host}:{args.tcp_port} (udp {args.udp_port})",
         f"  mode        : {args.mode}",
         f"  schedule    : {schedule}",
+    ]
+    if frame is not None:
+        lines.append(f"  time frame  : {frame}")
+    lines += [
         f"  max run time: {max_time}",
         f"  probe       : channel {args.probe_channel!r}, user {args.probe_username!r}",
         f"  whitelist   : {args.whitelist}",
@@ -811,6 +865,11 @@ def interactive_run() -> int:
     and one question that defaults to No starts the ramp.  The account answers
     become the probe login, exactly as ``--probe-username`` /
     ``--probe-password`` do on the flag path.
+
+    One question is ramp-specific: how long the whole test should run for.
+    Zero (the default) keeps the default per-stage plan; any other value is
+    the total time frame the stages are sized to fill, exactly as
+    ``--total-time`` does on the flag path.
     """
     config = prompt_connection_config(channel_required=False)
     whitelist = Path(os.environ.get("TT_WHITELIST", str(DEFAULT_WHITELIST)))
@@ -818,13 +877,6 @@ def interactive_run() -> int:
     # go/no-go question so the operator is never asked to confirm a run that
     # cannot proceed.  run() re-checks it either way.
     ensure_server_allowed(config.host, whitelist)
-    if not prompt_yes_no(
-        f"Run the ramped flood test on {config.host} "
-        f"(up to {DEFAULT_MAX_THREADS} flood threads per stage)?",
-        False,
-    ):
-        print("Ramp cancelled.")
-        return 0
     # The prompt above is this run's confirmation; validate_args inside run()
     # re-checks the whitelist and every bound.
     args = argparse.Namespace(
@@ -846,7 +898,29 @@ def interactive_run() -> int:
         whitelist=str(whitelist),
         dry_run=False,
         confirm=True,
+        total_time=None,
     )
+    # The interactive plan is fixed (1 -> DEFAULT_MAX_THREADS threads, factor
+    # 2), so the frame is bounded by stage count x the per-stage ceiling;
+    # anything larger would fall outside the 1-60 s per-stage bound.
+    stage_count = len(build_stages(args))
+    frame = prompt_float(
+        "How long would you like the test to run for, in total seconds "
+        "(0 = the default stage plan)",
+        0.0,
+        minimum=0.0,
+        maximum=MAX_DURATION_SECONDS * stage_count,
+    )
+    if frame:
+        args.total_time = frame
+    frame_note = f", whole test sized to {frame:g}s" if frame else ""
+    if not prompt_yes_no(
+        f"Run the ramped flood test on {config.host} "
+        f"(up to {DEFAULT_MAX_THREADS} flood threads per stage{frame_note})?",
+        False,
+    ):
+        print("Ramp cancelled.")
+        return 0
     return run(args)
 
 
