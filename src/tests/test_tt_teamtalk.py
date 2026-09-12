@@ -272,6 +272,29 @@ class TestPrompts:
         monkeypatch.setattr(tt_teamtalk.getpass, "getpass", lambda prompt="": "")
         assert tt_teamtalk.prompt_text("Password", "oldpw", secret=True) == "oldpw"
 
+    def test_prompt_text_blank_default_on_enter(self, monkeypatch):
+        seen = {}
+
+        def fake_input(prompt=""):
+            seen["prompt"] = prompt
+            return ""
+
+        monkeypatch.setattr("builtins.input", fake_input)
+        assert tt_teamtalk.prompt_text("Username", "") == ""
+        assert "[blank]" in seen["prompt"]
+
+    def test_prompt_secret_blank_default_on_enter(self, monkeypatch):
+        monkeypatch.setattr(tt_teamtalk.getpass, "getpass", lambda prompt="": "")
+        assert tt_teamtalk.prompt_text("Password", "", secret=True) == ""
+
+    def test_connection_prompts_accept_blank_credentials(self, monkeypatch):
+        # A blank username and password are a valid answer: anonymous login.
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr(tt_teamtalk.getpass, "getpass", lambda prompt="": "")
+        config = tt_teamtalk.prompt_connection_config(channel_required=False)
+        assert config.username == ""
+        assert config.password == ""
+
     def test_prompt_int_retries_until_valid(self, monkeypatch, capsys):
         answers = iter(["nope", "3"])
         monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
@@ -347,6 +370,12 @@ def _args_namespace(**overrides):
 
 
 class TestConfigFromArgs:
+    def test_blank_credentials_default(self):
+        # No account anywhere: blank username and password mean anonymous.
+        config = tt_teamtalk.ConnectionConfig(host="server.local")
+        assert config.username == ""
+        assert config.password == ""
+
     def test_happy_path(self):
         config = tt_teamtalk.config_from_args(_args_namespace())
         assert config.host == "server.local"

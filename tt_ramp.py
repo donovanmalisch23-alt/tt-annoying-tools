@@ -10,16 +10,32 @@ and reports where the server's resilience ends -- the sustained load it holds,
 the load where it degrades, and the load where it breaks -- so the server can be
 hardened against exactly that point.
 
-Local-only by construction, just like ``tt_loic``: the target must resolve to an
-address on this machine (loopback or one of its own interfaces) AND be present
-in ``whitelist.txt``, ``--confirm`` is required to spawn any flood, and
-``--dry-run`` prints the full stage plan without starting anything.  The
-per-stage flood length and thread count are bounded by ``tt_loic``'s existing
-ceilings (60 s, 64 threads); this tool never raises them.
+Any host in ``whitelist.txt`` is a legal target: the operator-edited whitelist is
+the sole authorization gate (same as the rest of the suite), so a whitelisted
+server does not have to be this machine.  ``--confirm`` is still required on the
+flag path to spawn any flood, and ``--dry-run`` prints the full stage plan
+without starting anything.
+The per-stage flood length is bounded by ``tt_loic``'s existing ceiling (60 s),
+and the ramp's thread count by its own ``RAMP_MAX_THREADS`` (default 64,
+maximum 1024).  Each stage can also carry its own flood length with
+``--stage-durations`` (the last entry repeats for any further stages),
+``--simultaneous`` floods every stage at the same time instead of one after
+another, and ``--max-total-time`` caps the whole run's wall clock: when the
+cap expires every flood stops and the run reports the results collected so
+far.  All three also read ``TT_RAMP_STAGE_DURATIONS``,
+``TT_RAMP_SIMULTANEOUS``, and ``TT_RAMP_MAX_TOTAL_TIME`` so a ramp can be
+configured without flags.
 
-Point this only at a TeamTalk server you run on this machine, and use the
-findings to harden that server (raise accept backlog, add rate limiting, bound
-per-client work, tune the channel/user caps) -- not to attack it.
+Running with no arguments opens the same interactive prompts as the rest of
+the suite — server host, TCP port, UDP port, and account, all defaulting from
+``teamtalk.env`` — then applies the whitelist gate and asks one go/no-go
+question that defaults to No before the ramp starts.  The account may be
+left blank: a blank username and password log the probe in anonymously,
+which servers without user accounts accept.
+
+Point this only at TeamTalk servers you administer and have whitelisted, and
+use the findings to harden that server (raise accept backlog, add rate
+limiting, bound per-client work, tune the channel/user caps) -- not to attack it.
 """
 
 from __future__ import annotations
@@ -40,6 +56,8 @@ from tt_teamtalk import (
     TeamTalkError,
     comma_int,
     print_tool_error,
+    prompt_connection_config,
+    prompt_yes_no,
 )
 
 # The whitelist gate lives in the suite module; reuse it verbatim rather than
@@ -62,7 +80,6 @@ from tt_loic import (
     ProbeResult,
     ServiceProbe,
     FloodStats,
-    _assert_local_host,
     _median,
     _phase_summary,
     _run_flood,
@@ -72,12 +89,13 @@ from tt_loic import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 10333
 DEFAULT_STAGE_DURATION = 10.0      # seconds of flood per stage
+DEFAULT_TIMEOUT = 5.0              # socket timeout for the flood workers
 DEFAULT_START_THREADS = 1
 DEFAULT_RAMP_FACTOR = 2            # multiply the thread count each stage
 # The ramp's own thread ceiling, independent of tt_loic's 64-thread cap. The
 # default --max-threads stays at DEFAULT_MAX_THREADS (gentle); an operator who
-# wants to push past it passes --max-threads up to RAMP_MAX_THREADS. Both the
-# local-only assert and the whitelist + --confirm gates still apply.
+# wants to push past it passes --max-threads up to RAMP_MAX_THREADS. The
+# whitelist + --confirm gates still apply.
 DEFAULT_MAX_THREADS = 64
 RAMP_MAX_THREADS = 1024
 BASELINE_PROBES = 3                # taken once, before the ramp starts
@@ -92,15 +110,79 @@ DEGRADATION_LATENCY_RATIO = 2.0
 # CLI
 # --------------------------------------------------------------------------- #
 
+def parse_stage_durations(value: str) -> list[float]:
+    """argparse type: comma-separated per-stage flood lengths in seconds.
+
+    Stage 1 gets the first entry, stage 2 the second, and so on; when the
+    ramp has more stages than entries, the last entry repeats — so
+    ``--stage-durations 5,10`` runs stage 1 for 5 s and every later stage
+    for 10 s.  Bounds are enforced by ``validate_args`` so a directly
+    constructed namespace gets the same check.
+    """
+
+    entries = [entry.strip() for entry in str(value).split(",") if entry.strip()]
+    if not entries:
+        raise argparse.ArgumentTypeError("no stage durations were given")
+    durations: list[float] = []
+    for entry in entries:
+        try:
+            durations.append(float(entry))
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"{entry!r} is not a number of seconds"
+            ) from None
+    return durations
+
+
+def _env_flag(name: str) -> bool:
+    """True when an environment variable is set to a truthy value."""
+
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_positive_float(name: str) -> Optional[float]:
+    """A positive float env variable, or None when unset/invalid."""
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _stage_durations_from_env() -> Optional[list[float]]:
+    """``TT_RAMP_STAGE_DURATIONS`` as a list, or None when unset/invalid.
+
+    A malformed value warns and is ignored rather than crashing parser
+    construction — the same value can then be rejected with a proper
+    argparse error if it is also passed via the flag.
+    """
+
+    raw = os.environ.get("TT_RAMP_STAGE_DURATIONS", "").strip()
+    if not raw:
+        return None
+    try:
+        return parse_stage_durations(raw)
+    except argparse.ArgumentTypeError as exc:
+        print(
+            f"warning: ignoring TT_RAMP_STAGE_DURATIONS={raw!r}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Ramped breaking-point test: flood a TeamTalk server "
-        "running on this machine at increasing load, probing it at each "
-        "stage to find where it degrades and breaks. Local-only + whitelisted."
+        description="Ramped breaking-point test: flood a whitelisted TeamTalk "
+        "server at increasing load, probing it at each stage to find where it "
+        "degrades and breaks. Whitelist-gated."
     )
     parser.add_argument(
         "--host", default=DEFAULT_HOST,
-        help=f"target host; must be this machine and in whitelist.txt "
+        help=f"target host; must be listed in whitelist.txt "
         f"(default: {DEFAULT_HOST})",
     )
     parser.add_argument(
@@ -118,7 +200,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stage-duration", type=float, default=DEFAULT_STAGE_DURATION,
         help=f"seconds of flood per stage, 1-{int(MAX_DURATION_SECONDS)} "
-        f"(default: {int(DEFAULT_STAGE_DURATION)})",
+        f"(default: {int(DEFAULT_STAGE_DURATION)}); overridden per stage "
+        "by --stage-durations",
+    )
+    parser.add_argument(
+        "--stage-durations", type=parse_stage_durations,
+        default=_stage_durations_from_env(),
+        metavar="S[,S...]",
+        help="per-stage flood lengths in seconds, one per stage from stage 1 "
+        "on; the last entry repeats for any further stages, and each entry "
+        f"is capped at {int(MAX_DURATION_SECONDS)} "
+        "(env: TT_RAMP_STAGE_DURATIONS, e.g. \"5,10,20\")",
+    )
+    parser.add_argument(
+        "--simultaneous", action="store_true", default=_env_flag("TT_RAMP_SIMULTANEOUS"),
+        help="flood every stage at the same time instead of one after "
+        "another: all stages start together, each stops after its own "
+        "duration, and the combined load is the sum of all stage threads "
+        "(env: TT_RAMP_SIMULTANEOUS=1)",
+    )
+    parser.add_argument(
+        "--max-total-time", type=float,
+        default=_env_positive_float("TT_RAMP_MAX_TOTAL_TIME"),
+        metavar="SECONDS",
+        help="hard wall-clock cap for the whole ramp: when it expires every "
+        "flood stops and the ramp reports the results collected so far "
+        "(env: TT_RAMP_MAX_TOTAL_TIME)",
     )
     parser.add_argument(
         "--start-threads", type=comma_int, default=DEFAULT_START_THREADS,
@@ -136,16 +243,19 @@ def build_parser() -> argparse.ArgumentParser:
         f"(default: {DEFAULT_MAX_THREADS}; raise explicitly to push past it)",
     )
     parser.add_argument(
-        "--timeout", type=float, default=5.0,
-        help="socket timeout in seconds for the flood workers (default: 5)",
+        "--timeout", type=float, default=DEFAULT_TIMEOUT,
+        help=f"socket timeout in seconds for the flood workers "
+        f"(default: {DEFAULT_TIMEOUT:g})",
     )
     parser.add_argument(
-        "--probe-username", default="loadtest",
-        help="SDK probe login (default: loadtest, the local server's test account)",
+        "--probe-username", default=os.environ.get("TT_USERNAME", ""),
+        help="SDK probe login; blank logs the probe in anonymously "
+        "(default: TT_USERNAME or blank)",
     )
     parser.add_argument(
-        "--probe-password", default="loadtest",
-        help="SDK probe password (default: loadtest)",
+        "--probe-password", default=os.environ.get("TT_PASSWORD", ""),
+        help="SDK probe password; blank for anonymous login "
+        "(default: TT_PASSWORD or blank)",
     )
     parser.add_argument(
         "--probe-channel", default="/LoadTest",
@@ -163,7 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--confirm", action="store_true",
         help="required: confirms this deliberate ramped flood against the "
-        "local, whitelisted target",
+        "whitelisted target",
     )
     return parser
 
@@ -177,6 +287,17 @@ def validate_args(args: argparse.Namespace) -> None:
     if not 1 <= args.stage_duration <= MAX_DURATION_SECONDS:
         raise TeamTalkConfigurationError(
             f"--stage-duration must be between 1 and {int(MAX_DURATION_SECONDS)}s"
+        )
+    if args.stage_durations:
+        for position, value in enumerate(args.stage_durations, start=1):
+            if not 1 <= value <= MAX_DURATION_SECONDS:
+                raise TeamTalkConfigurationError(
+                    f"--stage-durations entry {position} ({value:g}s) must be "
+                    f"between 1 and {int(MAX_DURATION_SECONDS)}s"
+                )
+    if args.max_total_time is not None and args.max_total_time < 1:
+        raise TeamTalkConfigurationError(
+            "--max-total-time must be at least 1 second"
         )
     if not 1 <= args.start_threads <= RAMP_MAX_THREADS:
         raise TeamTalkConfigurationError(
@@ -200,11 +321,9 @@ def validate_args(args: argparse.Namespace) -> None:
         raise TeamTalkConfigurationError(
             "--confirm is required: this tool deliberately floods the target"
         )
-    # Two independent gates, both must pass:
-    #   1. the host is in the operator-edited whitelist, and
-    #   2. the host resolves to this machine (loopback / local interface).
+    # The operator-edited whitelist is the sole authorization gate: any host
+    # listed there is a legal target, on this machine or elsewhere.
     ensure_server_allowed(args.host.strip(), _whitelist_path(args))
-    _assert_local_host(args.host.strip())
 
 
 def _whitelist_path(args: argparse.Namespace) -> Path:
@@ -227,14 +346,24 @@ class RampStage:
 
 
 def build_stages(args: argparse.Namespace) -> list[RampStage]:
-    """Geometric thread ramp, clamped to --max-threads."""
+    """Geometric thread ramp, clamped to --max-threads.
+
+    Stage durations come from ``--stage-durations`` when given — the first
+    entry is stage 1's length, and the last entry repeats for any further
+    stages — and from ``--stage-duration`` otherwise.
+    """
     stages: list[RampStage] = []
+    durations = args.stage_durations or []
     threads = args.start_threads
     index = 0
     while True:
         index += 1
         clamped = min(threads, args.max_threads)
-        stages.append(RampStage(index, clamped, args.mode, args.stage_duration))
+        duration = (
+            durations[min(index - 1, len(durations) - 1)]
+            if durations else args.stage_duration
+        )
+        stages.append(RampStage(index, clamped, args.mode, duration))
         if clamped >= args.max_threads:
             break
         # Grow by the factor; round up so a factor of 1.5 still advances.
@@ -372,6 +501,73 @@ def _run_stage(
     return result
 
 
+def _run_simultaneous(
+    args: argparse.Namespace,
+    stages: list[RampStage],
+    probe: Optional[ServiceProbe],
+    stop_event: threading.Event,
+    stage_events: list[threading.Event],
+) -> list[StageResult]:
+    """Flood every stage at the same time; each stops after its own duration.
+
+    Unlike the sequential ramp there is no "stop at the first broken stage"
+    — every stage floods regardless, because the point of this mode is the
+    combined load (the sum of all stage threads) hitting the server at once.
+    A probe taken while several stages are still flooding is attributed to
+    each of them, so every stage's verdict reflects the window it was
+    actually running in.
+    """
+
+    results = [StageResult(stage=stage) for stage in stages]
+
+    def _flood(stage: RampStage, result: StageResult, stage_event: threading.Event):
+        result.flood_stats = _run_flood(_stage_args(args, stage), stage_event)
+
+    threads = []
+    for stage, result, stage_event in zip(stages, results, stage_events):
+        thread = threading.Thread(
+            target=_flood, args=(stage, result, stage_event),
+            daemon=True, name=f"ramp-simul-{stage.index}",
+        )
+        thread.start()
+        threads.append(thread)
+
+    def _flooding() -> bool:
+        return any(thread.is_alive() for thread in threads) and not stop_event.is_set()
+
+    started = time.monotonic()
+    if probe is not None:
+        while _flooding():
+            probe_result = probe.probe("during")
+            elapsed = time.monotonic() - started
+            for stage, stage_result in zip(stages, results):
+                if elapsed <= stage.duration:
+                    stage_result.during.append(probe_result)
+            # wait ~PROBE_CADENCE, but wake early when the floods end
+            waited = 0.0
+            while waited < PROBE_CADENCE and _flooding():
+                time.sleep(0.1)
+                waited += 0.1
+    else:
+        while _flooding():
+            time.sleep(0.1)
+
+    # Set every stage's stop event before joining: for threads still
+    # flooding (e.g. after the total-time cap fired) this guarantees they
+    # have returned — and recorded their stats — before results are read.
+    for stage_event in stage_events:
+        stage_event.set()
+    for thread in threads:
+        thread.join(timeout=5.0)
+
+    if probe is not None and not stop_event.is_set():
+        for stage_result in results:
+            for _ in range(AFTER_PROBES_PER_STAGE):
+                stage_result.after.append(probe.probe("after"))
+        time.sleep(0.2)
+    return results
+
+
 # --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
@@ -453,11 +649,19 @@ def _summary(stages: list[StageResult]) -> str:
 # --------------------------------------------------------------------------- #
 
 def _dry_run_plan(args: argparse.Namespace, stages: list[RampStage]) -> str:
+    schedule = (
+        "simultaneous (all stages flood at once)"
+        if args.simultaneous else "sequential (one stage at a time)"
+    )
+    max_time = (
+        f"{args.max_total_time:g}s (hard stop)" if args.max_total_time else "uncapped"
+    )
     lines = [
         "tt_ramp dry run — nothing will be flooded. Planned stages:",
         f"  target      : {args.host}:{args.tcp_port} (udp {args.udp_port})",
         f"  mode        : {args.mode}",
-        f"  stage length: {args.stage_duration:g}s",
+        f"  schedule    : {schedule}",
+        f"  max run time: {max_time}",
         f"  probe       : channel {args.probe_channel!r}, user {args.probe_username!r}",
         f"  whitelist   : {args.whitelist}",
         f"  stages      : {len(stages)}",
@@ -465,8 +669,7 @@ def _dry_run_plan(args: argparse.Namespace, stages: list[RampStage]) -> str:
     for stage in stages:
         lines.append(f"    {stage.label()}")
     lines.append(
-        "Re-run with --confirm (and the host in whitelist.txt + on this machine) "
-        "to execute the ramp."
+        "Re-run with --confirm (and the host in whitelist.txt) to execute the ramp."
     )
     return "\n".join(lines)
 
@@ -484,6 +687,29 @@ def run(args: argparse.Namespace) -> int:
     baseline: list[ProbeResult] = []
     results: list[StageResult] = []
     stop_event = threading.Event()
+    # In simultaneous mode every stage gets its own stop event so the
+    # total-time cap can end stages independently; the shared stop_event
+    # still carries Ctrl+C and the cap for the sequential loop.
+    stage_events = [
+        threading.Event() for _ in stages
+    ] if args.simultaneous else []
+
+    # The wall-clock cap for the whole run: one timer that, when it fires,
+    # stops everything — the shared event and every per-stage event.
+    cap_timer: Optional[threading.Timer] = None
+    if args.max_total_time:
+        def _expire_cap() -> None:
+            print(
+                f"\n(max total time {args.max_total_time:g}s reached — "
+                "stopping every stage)",
+                file=sys.stderr,
+            )
+            stop_event.set()
+            for stage_event in stage_events:
+                stage_event.set()
+
+        cap_timer = threading.Timer(args.max_total_time, _expire_cap)
+        cap_timer.daemon = True
 
     # One SIGINT handler: stop the current stage's flood and end the ramp.
     def _stop(*_):
@@ -509,7 +735,7 @@ def run(args: argparse.Namespace) -> int:
         if baseline and all(p.connect_ms is None for p in baseline):
             raise TeamTalkError(
                 f"nothing is listening on {host}:{args.tcp_port}; "
-                "start the local TeamTalk server first."
+                "start the TeamTalk server first."
             )
         baseline_relays = [p.relay_ms for p in baseline if p.relay_ms is not None]
         baseline_median = _median(baseline_relays) if baseline_relays else None
@@ -519,29 +745,48 @@ def run(args: argparse.Namespace) -> int:
         )
         if baseline_median is not None:
             print(f"Baseline message RTT median: {baseline_median:.1f} ms")
-        print(
-            f"\nRamping {host} ({args.mode}) across {len(stages)} stage(s) of "
-            f"{args.stage_duration:g}s each. Ctrl+C stops early."
-        )
+        if args.simultaneous:
+            print(
+                f"\nFlooding {host} ({args.mode}) with all {len(stages)} stage(s) "
+                f"at the same time ({sum(stage.threads for stage in stages)} "
+                "thread(s) combined). Ctrl+C stops early."
+            )
+        else:
+            print(
+                f"\nRamping {host} ({args.mode}) across {len(stages)} stage(s). "
+                "Ctrl+C stops early."
+            )
 
-        for stage in stages:
-            if stop_event.is_set():
-                break
-            result = _run_stage(args, stage, probe, stop_event)
-            classify_stage(result, baseline_median)
-            print(result.line())
-            print(f"    flood: {_flood_totals(result.flood_stats)}")
-            results.append(result)
-            # The breaking point is the finding; stop once the server breaks.
-            if result.verdict == "broken":
-                print("Server broke — stopping the ramp at the breaking point.")
-                break
+        if cap_timer is not None:
+            cap_timer.start()
+
+        if args.simultaneous:
+            results = _run_simultaneous(args, stages, probe, stop_event, stage_events)
+            for result in results:
+                classify_stage(result, baseline_median)
+                print(result.line())
+                print(f"    flood: {_flood_totals(result.flood_stats)}")
+        else:
+            for stage in stages:
+                if stop_event.is_set():
+                    break
+                result = _run_stage(args, stage, probe, stop_event)
+                classify_stage(result, baseline_median)
+                print(result.line())
+                print(f"    flood: {_flood_totals(result.flood_stats)}")
+                results.append(result)
+                # The breaking point is the finding; stop once the server breaks.
+                if result.verdict == "broken":
+                    print("Server broke — stopping the ramp at the breaking point.")
+                    break
 
     except KeyboardInterrupt:
         stop_event.set()
         print("Interrupted; stopping the ramp.")
     finally:
         stop_event.set()
+        if cap_timer is not None:
+            cap_timer.cancel()
         try:
             signal.signal(signal.SIGINT, prev)
         except ValueError:
@@ -557,15 +802,59 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def interactive_run() -> int:
+    """No-arguments path: the suite's shared prompts, then one go/no-go.
+
+    Same interface as the other tools: ``prompt_connection_config`` asks for
+    the server host, TCP port, UDP port, and account (Enter accepts the
+    ``teamtalk.env`` defaults), the whitelist gate runs before anything else,
+    and one question that defaults to No starts the ramp.  The account answers
+    become the probe login, exactly as ``--probe-username`` /
+    ``--probe-password`` do on the flag path.
+    """
+    config = prompt_connection_config(channel_required=False)
+    whitelist = Path(os.environ.get("TT_WHITELIST", str(DEFAULT_WHITELIST)))
+    # Gate first: a host that is not whitelisted is refused before the
+    # go/no-go question so the operator is never asked to confirm a run that
+    # cannot proceed.  run() re-checks it either way.
+    ensure_server_allowed(config.host, whitelist)
+    if not prompt_yes_no(
+        f"Run the ramped flood test on {config.host} "
+        f"(up to {DEFAULT_MAX_THREADS} flood threads per stage)?",
+        False,
+    ):
+        print("Ramp cancelled.")
+        return 0
+    # The prompt above is this run's confirmation; validate_args inside run()
+    # re-checks the whitelist and every bound.
+    args = argparse.Namespace(
+        host=config.host,
+        tcp_port=config.tcp_port,
+        udp_port=config.udp_port,
+        mode="both",
+        stage_duration=DEFAULT_STAGE_DURATION,
+        stage_durations=None,
+        simultaneous=False,
+        max_total_time=None,
+        start_threads=DEFAULT_START_THREADS,
+        ramp_factor=DEFAULT_RAMP_FACTOR,
+        max_threads=DEFAULT_MAX_THREADS,
+        timeout=DEFAULT_TIMEOUT,
+        probe_username=config.username,
+        probe_password=config.password,
+        probe_channel=os.environ.get("TT_CHANNEL_PATH", "").strip() or "/LoadTest",
+        whitelist=str(whitelist),
+        dry_run=False,
+        confirm=True,
+    )
+    return run(args)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         if not actual_argv:
-            print(
-                "This tool is flag-only for safety: pass --host and --confirm "
-                "(see --help), or --dry-run to preview the ramp."
-            )
-            return 2
+            return interactive_run()
         return run(build_parser().parse_args(actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)

@@ -10,8 +10,15 @@ during, and after the flood, and whether the server stays in service.
 
 Local-only by construction: the target must resolve to an address on this
 machine (loopback or one of its own interfaces), the run length is capped,
-and ``--confirm`` is required.  Point this only at a server you run on this
-machine.
+and ``--confirm`` is required on the flag path.  Point this only at a server
+you run on this machine.
+
+Running with no arguments opens the same interactive prompts as the rest of
+the suite — server host, TCP port, UDP port, and account, all defaulting from
+``teamtalk.env`` — then applies the local-only gate and asks one go/no-go
+question that defaults to No before the flood starts.  The account may be
+left blank: a blank username and password log the probe in anonymously,
+which servers without user accounts accept.
 """
 
 from __future__ import annotations
@@ -36,6 +43,8 @@ from tt_teamtalk import (
     comma_int,
     message_fields,
     print_tool_error,
+    prompt_connection_config,
+    prompt_yes_no,
     sdk_event,
     sdk_int,
 )
@@ -43,6 +52,9 @@ from tt_teamtalk import (
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 10333
+DEFAULT_THREADS = 8
+DEFAULT_DURATION = 10.0
+DEFAULT_TIMEOUT = 5.0
 MAX_DURATION_SECONDS = 60
 MAX_THREADS = 64
 TCP_CHUNK_BYTES = 1024
@@ -127,24 +139,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="flood mode: LOIC's TCP flood, UDP flood, or both (default: both)",
     )
     parser.add_argument(
-        "--threads", type=comma_int, default=8,
-        help=f"flood threads per mode, 1-{MAX_THREADS} (default: 8)",
+        "--threads", type=comma_int, default=DEFAULT_THREADS,
+        help=f"flood threads per mode, 1-{MAX_THREADS} "
+        f"(default: {DEFAULT_THREADS})",
     )
     parser.add_argument(
-        "--duration", type=float, default=10.0,
-        help=f"flood length in seconds, capped at {MAX_DURATION_SECONDS} (default: 10)",
+        "--duration", type=float, default=DEFAULT_DURATION,
+        help=f"flood length in seconds, capped at {MAX_DURATION_SECONDS} "
+        f"(default: {DEFAULT_DURATION:g})",
     )
     parser.add_argument(
-        "--timeout", type=float, default=5.0,
-        help="socket timeout in seconds, like LOIC's timeout field (default: 5)",
+        "--timeout", type=float, default=DEFAULT_TIMEOUT,
+        help=f"socket timeout in seconds, like LOIC's timeout field "
+        f"(default: {DEFAULT_TIMEOUT:g})",
     )
     parser.add_argument(
-        "--probe-username", default="loadtest",
-        help="SDK probe login (default: loadtest, the local server's test account)",
+        "--probe-username", default=os.environ.get("TT_USERNAME", ""),
+        help="SDK probe login; blank logs the probe in anonymously "
+        "(default: TT_USERNAME or blank)",
     )
     parser.add_argument(
-        "--probe-password", default="loadtest",
-        help="SDK probe password (default: loadtest)",
+        "--probe-password", default=os.environ.get("TT_PASSWORD", ""),
+        help="SDK probe password; blank for anonymous login "
+        "(default: TT_PASSWORD or blank)",
     )
     parser.add_argument(
         "--probe-channel", default="/LoadTest",
@@ -748,15 +765,52 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def interactive_run() -> int:
+    """No-arguments path: the suite's shared prompts, then one go/no-go.
+
+    Same interface as the other tools: ``prompt_connection_config`` asks for
+    the server host, TCP port, UDP port, and account (Enter accepts the
+    ``teamtalk.env`` defaults), the local-only gate runs before anything
+    else, and one question that defaults to No starts the flood.  The
+    account answers become the probe login, exactly as ``--probe-username``
+    / ``--probe-password`` do on the flag path.
+    """
+    config = prompt_connection_config(channel_required=False)
+    # Gate first: a target that is not this machine is refused before the
+    # go/no-go question so the operator is never asked to confirm a run that
+    # cannot proceed.  run() re-checks it either way.
+    _assert_local_host(config.host)
+    if not prompt_yes_no(
+        f"Flood {config.host} (TCP + UDP, {DEFAULT_THREADS} thread(s) per "
+        f"mode, {DEFAULT_DURATION:g}s)?",
+        False,
+    ):
+        print("Flood cancelled.")
+        return 0
+    # The prompt above is this run's confirmation; validate_args inside run()
+    # re-checks the local-only assert, the confirm requirement, and every bound.
+    args = argparse.Namespace(
+        host=config.host,
+        tcp_port=config.tcp_port,
+        udp_port=config.udp_port,
+        mode="both",
+        threads=DEFAULT_THREADS,
+        duration=DEFAULT_DURATION,
+        timeout=DEFAULT_TIMEOUT,
+        probe_username=config.username,
+        probe_password=config.password,
+        probe_channel=os.environ.get("TT_CHANNEL_PATH", "").strip() or "/LoadTest",
+        no_probe=False,
+        confirm=True,
+    )
+    return run(args)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         if not actual_argv:
-            print(
-                "This tool is flag-only for safety: pass --host/--mode/--duration "
-                "and --confirm (see --help)."
-            )
-            return 2
+            return interactive_run()
         return run(build_parser().parse_args(actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)

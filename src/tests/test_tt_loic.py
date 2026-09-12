@@ -12,7 +12,7 @@ import argparse
 import pytest
 
 import tt_loic
-from tt_teamtalk import TeamTalkConfigurationError, TeamTalkError
+from tt_teamtalk import ConnectionConfig, TeamTalkConfigurationError, TeamTalkError
 
 
 def namespace(**overrides):
@@ -37,6 +37,18 @@ def namespace(**overrides):
 class TestValidateArgs:
     def test_defaults_ok(self):
         tt_loic.validate_args(namespace())  # must not raise
+
+    def test_probe_credentials_default_blank(self, monkeypatch):
+        # No hardcoded account: blank means the probe logs in anonymously.
+        monkeypatch.delenv("TT_USERNAME", raising=False)
+        monkeypatch.delenv("TT_PASSWORD", raising=False)
+        args = tt_loic.build_parser().parse_args([])
+        assert args.probe_username == ""
+        assert args.probe_password == ""
+
+    def test_blank_probe_credentials_allowed(self):
+        # Anonymous login is a valid probe account on servers without users.
+        tt_loic.validate_args(namespace(probe_username="", probe_password=""))
 
     def test_confirm_required(self):
         with pytest.raises(TeamTalkConfigurationError, match="--confirm"):
@@ -238,3 +250,109 @@ class TestProbeRootFallback:
         assert probe.session is None
         assert probe.listener is None
         assert "SDK login unavailable" in capsys.readouterr().out
+
+
+class TestInteractiveRun:
+    """No-arguments path: shared prompts, local gate before the go/no-go."""
+
+    def _config(self, **overrides):
+        values = dict(
+            host="127.0.0.1",
+            tcp_port=10333,
+            udp_port=10333,
+            username="loadtest",
+            password="loadtest",
+        )
+        values.update(overrides)
+        return ConnectionConfig(**values)
+
+    def test_prompt_answers_become_flood_args(self, monkeypatch):
+        captured = {}
+
+        def fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(
+            tt_loic, "prompt_connection_config",
+            lambda **_: self._config(username="probe", password="secret"),
+        )
+        monkeypatch.setattr(
+            tt_loic, "prompt_yes_no", lambda label, default: True
+        )
+        monkeypatch.setattr(tt_loic, "run", fake_run)
+        assert tt_loic.interactive_run() == 0
+        args = captured["args"]
+        # The account answers become the probe login; host/ports the target.
+        assert args.host == "127.0.0.1"
+        assert (args.tcp_port, args.udp_port) == (10333, 10333)
+        assert args.probe_username == "probe"
+        assert args.probe_password == "secret"
+        assert args.probe_channel == "/LoadTest"
+        # The go/no-go answer stands in for --confirm; nothing else changes.
+        assert args.confirm is True
+        assert args.no_probe is False
+        assert args.threads == tt_loic.DEFAULT_THREADS
+        assert args.duration == tt_loic.DEFAULT_DURATION
+
+    def test_declined_go_no_go_cancels_without_flooding(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            tt_loic, "prompt_connection_config", lambda **_: self._config()
+        )
+        monkeypatch.setattr(
+            tt_loic, "prompt_yes_no", lambda label, default: False
+        )
+        monkeypatch.setattr(
+            tt_loic, "run", lambda args: pytest.fail("declined run must not start")
+        )
+        assert tt_loic.interactive_run() == 0
+        assert "Flood cancelled." in capsys.readouterr().out
+
+    def test_remote_host_refused_before_go_no_go(self, monkeypatch):
+        monkeypatch.setattr(
+            tt_loic, "prompt_connection_config",
+            lambda **_: self._config(host="203.0.113.10"),
+        )
+        monkeypatch.setattr(
+            tt_loic, "prompt_yes_no",
+            lambda label, default: pytest.fail("refused host must not reach confirm"),
+        )
+        with pytest.raises(
+            TeamTalkConfigurationError, match="only floods servers running locally"
+        ):
+            tt_loic.interactive_run()
+
+
+class TestMainDispatch:
+    def test_no_args_dispatches_to_interactive_run(self, monkeypatch):
+        called = []
+
+        def fake_interactive():
+            called.append(True)
+            return 7
+
+        monkeypatch.setattr(tt_loic, "interactive_run", fake_interactive)
+        assert tt_loic.main([]) == 7
+        assert called == [True]
+
+    def test_flag_path_still_requires_confirm(self, monkeypatch):
+        monkeypatch.setattr(
+            tt_loic, "_run_flood",
+            lambda args, stop_event: pytest.fail("must not flood"),
+        )
+        assert tt_loic.main(["--host", "127.0.0.1", "--duration", "5"]) == 2
+
+    def test_flag_path_parses_and_runs(self, monkeypatch):
+        captured = {}
+
+        def fake_run(args):
+            captured["args"] = args
+            return 0
+
+        monkeypatch.setattr(tt_loic, "run", fake_run)
+        assert tt_loic.main(
+            ["--host", "127.0.0.1", "--confirm", "--duration", "5", "--mode", "udp"]
+        ) == 0
+        assert captured["args"].duration == 5.0
+        assert captured["args"].mode == "udp"
+        assert captured["args"].confirm is True

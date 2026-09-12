@@ -493,7 +493,9 @@ class ConnectionConfig:
     host: str
     tcp_port: int = 10333
     udp_port: int = 10333
-    username: str = "guest"
+    # Blank username and password mean an anonymous login: servers without
+    # user accounts accept those, and no single account works everywhere.
+    username: str = ""
     password: str = ""
     nickname: str = "tt-api-client"
     client_name: str = "TT Annoying Tools Linux API"
@@ -513,10 +515,17 @@ class ConnectionConfig:
 
 
 def prompt_text(label: str, default: Optional[str] = None, *, secret: bool = False) -> str:
-    """Read one interactive value, retaining a supplied default on Enter."""
+    """Read one interactive value, retaining a supplied default on Enter.
+
+    ``default=""`` is meaningful — a blank answer — so it renders as
+    ``[blank]`` instead of the no-default ``label:`` form, and Enter
+    accepts the blank rather than falling through to nothing.
+    """
 
     if default is None:
         prompt = f"{label}: "
+    elif default == "":
+        prompt = f"{label} [blank]: "
     elif secret:
         prompt = f"{label} [configured]: "
     else:
@@ -626,9 +635,18 @@ def prompt_connection_config(*, channel_required: bool) -> ConnectionConfig:
     host = prompt_text("TeamTalk server host", os.environ.get("TT_HOST", "127.0.0.1"))
     tcp_port = prompt_int("TeamTalk TCP port", _env_int("TT_TCP_PORT", 10333), minimum=1, maximum=65535)
     udp_port = prompt_int("TeamTalk UDP port", _env_int("TT_UDP_PORT", 10333), minimum=1, maximum=65535)
-    username = prompt_text("TeamTalk username", os.environ.get("TT_USERNAME", "guest"))
-    configured_password = os.environ.get("TT_PASSWORD", "")
-    password = prompt_text("TeamTalk password", configured_password or None, secret=True)
+    # A blank username and password are a valid answer: they log in
+    # anonymously, which servers without user accounts accept.  Enter keeps
+    # the blank unless TT_USERNAME / TT_PASSWORD configure real credentials.
+    username = prompt_text(
+        "TeamTalk username (blank logs in anonymously)",
+        os.environ.get("TT_USERNAME", ""),
+    )
+    password = prompt_text(
+        "TeamTalk password",
+        os.environ.get("TT_PASSWORD", ""),
+        secret=True,
+    )
     nickname = prompt_text("TeamTalk nickname", os.environ.get("TT_NICKNAME", "tt-api-client"))
     encrypted = prompt_yes_no(
         "Is the TeamTalk server encrypted?",
@@ -697,13 +715,15 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--username",
-        default=os.environ.get("TT_USERNAME", "guest"),
-        help="TeamTalk username (default: TT_USERNAME or guest)",
+        default=os.environ.get("TT_USERNAME", ""),
+        help="TeamTalk username; blank logs in anonymously "
+        "(default: TT_USERNAME or blank)",
     )
     parser.add_argument(
         "--password",
         default=os.environ.get("TT_PASSWORD", ""),
-        help="TeamTalk password; prefer TT_PASSWORD to keep it out of shell history",
+        help="TeamTalk password; blank for anonymous login, prefer TT_PASSWORD "
+        "to keep it out of shell history",
     )
     parser.add_argument(
         "--nickname",
