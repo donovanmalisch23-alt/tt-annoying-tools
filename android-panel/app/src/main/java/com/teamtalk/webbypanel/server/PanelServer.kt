@@ -237,7 +237,9 @@ class PanelServer(
             )
 
             relative == INDEX -> {
-                val html = readAsset(INDEX)
+                // Decoded, not passed through: the shell script is injected into
+                // this page before it is sent, so it has to be text.
+                val html = readAsset(INDEX)?.toString(StandardCharsets.UTF_8)
                 if (html == null) respond(out, 200, "OK", head, HTML_TYPE, NO_STORE, missingAssetsPage())
                 else respond(out, 200, "OK", head, HTML_TYPE, NO_STORE, injectBoot(html))
             }

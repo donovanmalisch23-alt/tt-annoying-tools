@@ -727,14 +727,18 @@ APK instead. See [`android-panel/README.md`](android-panel/README.md).
 
 ### Honest limits
 
-The wrapper is not compiled in this workspace — there is no JDK, Gradle or
-Android SDK in it — so the first build is bring-up, exactly like `android/`.
-What *is* checked is the wiring a compiler would trip over first:
-`bun run android-check` resolves every `R.*` reference against the declared
-resources, every `@type/name` reference, every `BuildConfig.*` field and every
-version-catalog alias, confirms the manifest's activity exists, and checks the
-seams between the wrapper and the panel (the `localStorage` key, the port range,
-the asset directory, the theme colour).
+The wrapper is compiled, not merely checked: `assembleDebug` succeeds with JDK 17
+(Temurin 17.0.20), Gradle 8.9, AGP 8.7.2, Kotlin 2.0.20 and build-tools 35.0.0,
+and the APK on the `panel-v0.1.0-alpha-soft` release came from those sources.
+That first real build caught two compile errors no hand-written check could —
+`PanelServer`'s trailing lambda binding to `ports` instead of `bootScript`, and
+`readAsset` returning `ByteArray?` into the code path that treats `index.html`
+as text. Both are fixed. `bun run android-check` still guards the wiring a
+compiler trips over first: it resolves every `R.*` reference against the
+declared resources, every `@type/name` reference, every `BuildConfig.*` field
+and every version-catalog alias, confirms the manifest's activity exists, and
+checks the seams between the wrapper and the panel (the `localStorage` key, the
+port range, the asset directory, the theme colour).
 
 ## Android (alpha-soft)
 

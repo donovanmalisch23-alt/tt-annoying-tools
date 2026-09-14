@@ -108,9 +108,13 @@ http and live mode may reach a bridge over plain http on the LAN.
 
 ## Limits
 
-- **Not compiled in the workspace this was written in** — there is no JDK,
-  Gradle or Android SDK there. Treat the first build as bring-up; expect Gradle
-  or version alignment nits, not design changes.
+- **Built and assembled once, for real.** JDK 17 (Temurin 17.0.20), Gradle 8.9,
+  AGP 8.7.2, Kotlin 2.0.20 and build-tools 35.0.0 produced the APK on the
+  `panel-v0.1.0-alpha-soft` release. The first build found two compile errors —
+  a trailing lambda binding to the constructor's `ports` parameter instead of
+  `bootScript`, and `readAsset` handing a `ByteArray?` to the `index.html` text
+  path. Both are fixed, and the workflow runs the same steps on a runner, so a
+  repeat build should be uneventful.
 - The app talks to a `webby` bridge, never to a TeamTalk server. Everything the
   panel can do on a real server goes through the bridge.
 - Android 8.0 (API 26) is the floor: the icon is an adaptive icon only, and

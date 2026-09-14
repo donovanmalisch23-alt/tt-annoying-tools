@@ -71,7 +71,12 @@ class MainActivity : Activity() {
     private fun startPanelServer() {
         // The boot script is read per request, so changing the bridge address
         // takes effect on the next reload without restarting the server.
-        val panel = PanelServer(applicationContext) { BootScript.forBridgeUrl(prefs.bridgeUrl) }
+        // Named, because a trailing lambda would bind to the constructor's last
+        // parameter (`ports`), not to `bootScript`.
+        val panel = PanelServer(
+            applicationContext,
+            bootScript = { BootScript.forBridgeUrl(prefs.bridgeUrl) },
+        )
         try {
             val bound = panel.start()
             server = panel
