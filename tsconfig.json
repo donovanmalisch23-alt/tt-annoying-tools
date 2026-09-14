@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": false,
+    "types": ["node", "vite/client"]
+  },
+  "include": [
+    "src/app",
+    "src/vite-env.d.ts",
+    "vite.config.ts",
+    "scripts/smoke.ts",
+    "scripts/bridge-check.ts",
+    "scripts/render-check.ts",
+    "scripts/browser-shim.ts",
+    "scripts/vite-webby.ts",
+    "scripts/android-panel-assets.ts",
+    "scripts/android-panel-check.ts"
+  ]
+}

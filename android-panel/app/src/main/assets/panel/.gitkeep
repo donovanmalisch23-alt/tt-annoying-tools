@@ -1,0 +1,5 @@
+# Keeps this directory in git.
+#
+# The built web panel is copied in here by `bun run android:assets`
+# (scripts/android-panel-assets.ts) and shipped inside the APK at
+# assets/panel/. It is a build artifact, so it is not committed.

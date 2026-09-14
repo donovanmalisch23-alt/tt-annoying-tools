@@ -461,6 +461,300 @@ not played automatically by the Python tools; use TeamTalk's own media controls
 or an approved audio-routing setup, at safe volume, on a consenting test
 channel.
 
+## Web panel (PWA)
+
+A browser control panel for the whole suite lives at the repository root: a
+Vite + React + TypeScript app that ports every tool from this CLI and runs it
+against an **in-tab model of a TeamTalk server**. It exists so the tools' logic
+can be demonstrated and tested — exact counts, kick resistance and recovery,
+discovery, load classification, the breaking-point verdict — without pointing
+anything at a real server, and so the result is installable as an app.
+
+```bash
+bun install
+bun run dev        # http://localhost:5173
+```
+
+| Purpose | Command |
+| --- | --- |
+| Install dependencies | `bun install` |
+| Dev server (binds `0.0.0.0`, honours `PORT`) | `bun run dev` |
+| Typecheck | `bun run typecheck` |
+| Tool smoke check (headless, 44 assertions) | `bun run smoke` |
+| Live-mode client, store and preview-proxy checks (headless) | `bun run bridge-check` |
+| Screen render check (headless) | `bun run render-check` |
+| Android wrapper checks (headless) | `bun run android-check` |
+| All five | `bun run check` |
+| Production build into `dist/` | `bun run build` |
+| Regenerate the PWA icons | `bun run icons` |
+| Build the panel and copy it into the APK's assets | `bun run android:assets` |
+
+### What is ported
+
+| CLI tool | Panel tool |
+| --- | --- |
+| `tt_message_spammer.py` | **Message sender** — channel or private sequences, counted exactly |
+| `tt_spammer.py` | **Login / logout cycles** |
+| `tt_leave_join_spammer.py` | **Channel leave / join** |
+| `tt_concurrent_bots.py` | **Idle bots** — parked clients with a kick watchdog |
+| `ttbot_the_offender.py` | **Response bot** — one trigger, allowlisted users, per-user cooldown |
+| `tt_suite.py` | **Combined suite** — discovery, sequential ops, concurrent bots |
+| `tt_loic.py` | **Local flood test** — before/during/after service probes |
+| `tt_ramp.py` | **Ramp / breaking point** — geometric stages until the server stops coping |
+
+### The simulator
+
+The model implements a real command path, so the panel exercises the tools'
+own logic rather than replaying canned output:
+
+- command latency with jitter, and command loss that grows as the server saturates;
+- flood protection that kicks a peer for exceeding a burst inside a window
+  (this is what drives kick resistance and the exact-count retries);
+- a max-user cap, channel passwords, hidden channels, and server-assigned user
+  IDs that change on every login;
+- a load curve that saturates at a fixed number of junk threads, with a
+  matching verdict for the flood and ramp tools;
+- synthetic joiners, so the suite's continuous new-joiner mode has targets;
+- one shared **time scale** (Dashboard) that compresses every wait, including
+  the boundaries that decide a kick or a cooldown, so verdicts are unchanged at
+  any speed.
+
+### Safety gates, kept intact
+
+The allowlist (`127.0.0.1` by default), the explicit confirmation toggle for the
+heavy tools, the local-only check on the flood test, and the bounded retries
+(three consecutive failures against one target give up cleanly) all behave as
+they do in the CLI. The response bot stays benign: one explicit trigger,
+allowlisted senders only, per-user cooldown.
+
+### Caps in the browser
+
+The CLI forks worker processes to stay under the native `select()`
+file-descriptor ceiling; one browser tab cannot fork, so the panel enforces
+128 idle bots, 64 concurrent suite bots, 64 flood threads per mode and 1024 ramp
+threads, refusing over-limit requests with a clear message instead of a crash.
+Flood stages stay capped at 60 s each.
+
+### Honest limits
+
+It is a model of a server, not a client for a real one: a passing run here is
+evidence about the tools, not about your server. The flood tools simulate thread
+counts against the load curve — a browser cannot open raw TCP/UDP sockets — and
+the Python tests in `src/tests/` still cover the CLI, not the panel. For the
+real thing, use **live mode** below.
+
+### Install as an app
+
+The panel ships a web manifest, an SVG icon and generated PNG icons (drawn by
+`scripts/gen-icons.mjs`, which needs no dependencies). Production builds
+register the offline shell service worker automatically; in development it is
+registered only when you turn on **Offline shell** under *Server & allowlist*,
+so a cached shell can never mask fresh code while you work.
+
+## Live mode: the Webby bridge (any server, any allowlist file)
+
+A browser cannot open a raw TCP connection to a TeamTalk server on port 10333,
+so the panel runs the real tools through a small local bridge: `webby/`, a
+standard-library-only Python package started by `run_webby.sh`. It serves the
+built panel, exposes a JSON/SSE API, starts the repository's own `tt_*.py`
+tools as child processes, and owns the allowlist file the admin panel edits.
+
+```bash
+./run_webby.sh start          # build if needed, then serve in the background
+./run_webby.sh status         # running? which allowlist, which admin, which run
+./run_webby.sh logs -f        # follow the bridge log
+./run_webby.sh admin set --username admin --generate   # create the admin login
+./run_webby.sh stop           # shut it down
+./run_webby.sh doctor         # check python, node, the SDK, the allowlist
+./run_webby.sh selftest       # 69 end-to-end checks, no server needed
+./run_webby.sh help           # every command and flag
+```
+
+`start` serves the panel **and** the API from the same origin
+(<http://127.0.0.1:8787> by default), which is the simplest way to use it: open
+that address, flip the header switch to **Live server**, and the Tools tab now
+drives the real CLI. If the panel is not built yet, `start` builds it first.
+
+### From the dev server and the preview
+
+`bun run dev` wires the same thing up automatically, because the dev server only
+exposes one port and the bridge listens on another. A dev-only Vite plugin
+(`scripts/vite-webby.ts`, `apply: "serve"`) does two things:
+
+1. it **proxies same-origin `/api/*`** — including the event stream — to the
+   bridge, so in the panel the page's own origin *is* the bridge; and
+2. it **starts the bridge as a child of the dev server** if nothing is serving
+   the port yet (`--ensure-admin`, so the first run prints an admin password into
+   the dev log), and stops it again when the dev server exits.
+
+So `bun run dev`, open the preview, and the header switch already works — live
+mode needs no second terminal. If a bridge is already running (for example
+`./run_webby.sh start`), it is adopted and left alone. Nothing is spawned during
+`vite build`, and `WEBBY_DISABLE=1` turns the whole thing off (then connect from
+the **Bridge & admin** tab, where the address field takes `http://host:8787`).
+
+The plugin keeps HMR disabled and the dev server bound to `0.0.0.0`; those
+settings are unchanged.
+
+### Any server, any allowlist file
+
+The bridge edits whatever allowlist file you point it at, and passes that exact
+path to the tools with `--whitelist`, so the file the panel edits is the file
+the tools enforce:
+
+```bash
+# A project-local list, or a shared one elsewhere on the machine:
+./run_webby.sh start --port 8787 --whitelist /etc/tt/approved-servers.txt
+
+# Or nothing at all: `--whitelist` also accepts a file that does not exist yet,
+# and the admin panel creates it on the first save.
+```
+
+Every connection value (host, ports, username, channel, encryption, kick
+resistance) comes from the *Server & allowlist* tab. The password is passed to
+the child in its environment (`TT_PASSWORD`), never on the command line, and
+the argv the bridge displays has credential flags replaced with `***`.
+
+### The admin panel
+
+The one privileged action is editing the allowlist, and it needs a real
+credential — so the bridge stores a PBKDF2-HMAC-SHA256 hash (240k iterations,
+per-file random salt, constant-time comparison) in `.webby/admin.json` with
+`0600` permissions:
+
+```bash
+./run_webby.sh admin set --username admin          # prompts, hidden input
+./run_webby.sh admin set --username admin --generate  # prints a password once
+./run_webby.sh admin show                          # who the admin is, never the password
+```
+
+`run_webby.sh start` creates a generated credential automatically on first run
+and prints it once. Sign in from the **Bridge & admin** tab, edit the file in
+place (it is validated before writing and replaced atomically), and sign out.
+Sessions are in-memory bearer tokens with an 8-hour expiry, and five failed
+sign-ins from one address within a minute are throttled. Because the token is a
+localhost convenience, keep the bridge bound to `127.0.0.1` unless you have a
+reason not to — `--host 0.0.0.0` exposes a process that runs tools and edits
+that file to your whole network.
+
+### Gates, three deep
+
+1. The **panel** disables Run when the target is not in its last-read copy.
+2. The **bridge** re-reads the file, applies the allowlist and the flood tool's
+   local-only check, and refuses before spawning anything.
+3. The **tool** reads the same file (via `--whitelist`) and refuses again.
+
+Credentials are never placed in argv, one run happens at a time (a second is
+refused), and stopping a run sends `SIGINT` — the tools shut themselves down
+cleanly — escalating to `SIGTERM`/`SIGKILL` only if they hang. `--max-run-seconds`
+and `--require-admin` are available as belt-and-braces options.
+
+### Verifying the bridge
+
+```bash
+python3 -m webby.selftest     # 69 checks, no server and no SDK needed
+./run_webby.sh selftest       # the same thing
+```
+
+The first section is the contract that matters most: for **every** tool the
+bridge builds, the tool's *own* `build_parser()` is asked to parse exactly the
+argv the bridge would run, no credential flag appears in that argv, and the
+password is present in the child's environment instead. If the bridge and a CLI
+ever drift apart, that check fails before anything else does. `bun run
+bridge-check` is the frontend half of the same idea — the client, the store, and
+the dev-server proxy/supervisor, all headless.
+
+The rest boots a real server on an ephemeral port in a temporary directory and
+walks the whole surface: health and the tool catalog, allowlist reads, a refused
+unauthenticated write, sign-in and throttling, an authorised write, the stale-
+`mtime` conflict, an invalid entry being rejected without damaging the file, the
+allowlist gate, the flood tool's local-only gate, a real child-process run
+streamed back over SSE, a second run being refused, the stop endpoint, and the
+static panel (SPA deep links, asset types, and a refused path traversal).
+
+## Android panel wrapper (APK)
+
+`android-panel/` is a small Kotlin app that runs this web panel **on the
+phone**: it serves the bundled build over `http://127.0.0.1:8788` and opens it
+in a WebView. That loopback origin is the whole trick — it makes the panel
+behave as a PWA inside the app (the manifest resolves, the service worker
+registers, settings persist), which a `file://` page cannot do.
+
+What it is, and is not:
+
+- **Simulated mode works offline.** The panel, all eight tools and the in-tab
+  server model ship inside the APK: no server, no bridge, no network.
+- **Live mode still needs a bridge on a desktop.** `webby/` is Python and cannot
+  run on Android, so the app's *Bridge* action points the panel at
+  `http://<desktop>:8787` over the local network (the bridge already allows any
+  origin). Use a desktop on the same Wi-Fi, started with
+  `./run_webby.sh start --host 0.0.0.0`.
+- The wrapper is a shell, not a port of anything: a header strip (Reload,
+  Bridge, Browser) and the WebView. `android/` below is the unrelated native
+  port.
+
+It needs Android 8.0 (API 26) or newer — the launcher icon is an adaptive icon
+only, and older WebViews cannot run the panel's bundle.
+
+```bash
+bun run android:assets    # vite build, then copy dist/ into the APK's assets
+bun run android:apk       # the same, then `gradle -p android-panel assembleDebug`
+bun run android-check     # structural checks for the wrapper (part of `bun run check`)
+```
+
+The built panel is not committed: `scripts/android-panel-assets.ts` copies
+`dist/` into `android-panel/app/src/main/assets/panel/`, and that copy is what
+the APK ships and the app serves.
+
+### Getting an APK
+
+The **Android panel APK** workflow
+(`.github/workflows/android-panel-release.yml`) does the whole thing on a
+runner — panel build, asset copy, Gradle, APK — and attaches it to a GitHub
+release, so testers get a download link instead of a build recipe. Run it from
+the Actions tab (**Run workflow**), or push a tag:
+
+```bash
+git tag panel-v0.1.0-alpha-soft && git push origin panel-v0.1.0-alpha-soft
+```
+
+Without signing secrets the artifact is a **debug-signed** APK: installable by
+sideloading, with the usual unknown-developer warning. Add the
+`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and
+`ANDROID_KEY_PASSWORD` repository secrets — or a `panel.keystore` entry in
+`android-panel/local.properties` — and the same workflow emits a release-signed
+APK instead. See [`android-panel/README.md`](android-panel/README.md).
+
+### Honest limits
+
+The wrapper is not compiled in this workspace — there is no JDK, Gradle or
+Android SDK in it — so the first build is bring-up, exactly like `android/`.
+What *is* checked is the wiring a compiler would trip over first:
+`bun run android-check` resolves every `R.*` reference against the declared
+resources, every `@type/name` reference, every `BuildConfig.*` field and every
+version-catalog alias, confirms the manifest's activity exists, and checks the
+seams between the wrapper and the panel (the `localStorage` key, the port range,
+the asset directory, the theme colour).
+
+## Android (alpha-soft)
+
+An experimental native Android port of this suite lives in `android/`: Kotlin +
+Jetpack Compose on top of BearWare's TeamTalk **Java** SDK, with every tool here
+ported (message/login/leave-join tests, idle bots, the response bot, the
+combined suite, the local flood test, and the ramp test). It is an alpha aimed
+at a small tester group.
+
+It is **not** a copy of `sdk/`: the TeamTalk Android SDK must be supplied by the
+builder, and the build requires an Android SDK/Gradle toolchain that this
+repository does not bundle. See [`android/README.md`](android/README.md) for the
+SDK drop-in paths, the build commands, and installation on test devices. (The
+`android-panel/` wrapper above is unrelated — it ships the web panel, needs no
+SDK, and always builds.)
+
+The same safety gates apply — an exact-host allowlist, an explicit confirmation
+for the heavy tools, the local-only check for the flood test, and a benign
+response bot.
+
 ## Credits
 
 The original project credited **blindelectron**, **RD-Productions**,

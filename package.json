@@ -1,0 +1,33 @@
+{
+  "name": "tt-annoying-tools-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Web control panel for the TeamTalk Annoying Tools suite, with an in-browser TeamTalk server simulator.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "smoke": "bun scripts/smoke.ts",
+    "bridge-check": "bun scripts/bridge-check.ts",
+    "render-check": "bun scripts/render-check.ts",
+    "android-check": "bun scripts/android-panel-check.ts",
+    "check": "tsc --noEmit && bun scripts/smoke.ts && bun scripts/bridge-check.ts && bun scripts/render-check.ts && bun scripts/android-panel-check.ts",
+    "icons": "node scripts/gen-icons.mjs",
+    "android:assets": "bun run build && bun scripts/android-panel-assets.ts",
+    "android:apk": "bun run android:assets && cd android-panel && gradle assembleDebug"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

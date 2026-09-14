@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="TeamTalk Annoying Tools">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16263d" />
+      <stop offset="1" stop-color="#070d16" />
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4ff0da" />
+      <stop offset="1" stop-color="#1a9c96" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.85" r="0.7">
+      <stop offset="0" stop-color="#2fd4c0" stop-opacity="0.35" />
+      <stop offset="1" stop-color="#2fd4c0" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  <rect width="512" height="512" rx="112" fill="url(#glow)" />
+  <g fill="url(#bar)">
+    <rect x="130" y="252" width="30" height="120" rx="15" />
+    <rect x="172" y="218" width="30" height="154" rx="15" />
+    <rect x="214" y="176" width="30" height="196" rx="15" />
+    <rect x="256" y="140" width="30" height="232" rx="15" />
+    <rect x="298" y="196" width="30" height="176" rx="15" />
+    <rect x="340" y="238" width="30" height="134" rx="15" />
+    <rect x="382" y="266" width="30" height="106" rx="15" />
+  </g>
+  <circle cx="271" cy="106" r="22" fill="#f4b740" />
+  <rect x="120" y="386" width="272" height="10" rx="5" fill="#2fd4c0" opacity="0.5" />
+</svg>

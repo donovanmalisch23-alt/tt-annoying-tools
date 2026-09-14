@@ -1,0 +1,13 @@
+# Version catalog for the Android wrapper.
+#
+# AGP is newer than the one in `../android/gradle/libs.versions.toml` on purpose:
+# this module compiles against `compileSdk = 35`, and everything below AGP 8.6
+# warns that it does not support that platform. Kotlin matches the sibling
+# module so the two builds stay on the same toolchain otherwise.
+[versions]
+agp = "8.7.2"
+kotlin = "2.0.20"
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TT Annoying Tools</string>
+    <string name="release_channel">alpha-soft</string>
+    <string name="run_channel_name">Test runner</string>
+    <string name="run_channel_description">Shows the TeamTalk test currently running</string>
+    <string name="run_notification_title">TeamTalk test running</string>
+    <string name="run_notification_stop">Stop</string>
+</resources>

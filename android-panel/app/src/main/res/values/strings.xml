@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TT Tools Panel</string>
+
+    <!-- channel · version · the loopback address the panel is served on -->
+    <string name="header_status">%1$s · panel v%2$s · %3$s</string>
+    <string name="startup_failed">panel server did not start</string>
+    <string name="startup_failed_unknown">no loopback port could be bound</string>
+
+    <string name="action_reload">Reload</string>
+    <string name="action_bridge">Bridge</string>
+    <string name="action_browser">Browser</string>
+    <string name="action_reset">Reset panel data</string>
+
+    <string name="bridge_dialog_title">Live-mode bridge</string>
+    <string name="bridge_dialog_message">Address of the machine running ./run_webby.sh, for example http://192.168.1.20:8787. Leave it empty to keep the panel on its in-app simulator.</string>
+    <string name="bridge_hint">http://192.168.1.20:8787</string>
+    <string name="bridge_saved">Bridge address saved; reloading the panel.</string>
+    <string name="bridge_cleared">Bridge address cleared; the panel keeps its own setting.</string>
+    <string name="reset_done">Panel data cleared.</string>
+    <string name="no_browser">No app on this device can open a web page.</string>
+</resources>

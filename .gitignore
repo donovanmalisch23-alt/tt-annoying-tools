@@ -18,3 +18,23 @@ env/
 # Local terminal-session captures and shell prompt state (not source).
 typescript
 .change-ip-state
+
+# Web panel (Vite + React PWA).
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Webby bridge state: pid file, log, and the admin credential hash.
+.webby/
+
+# Android panel wrapper (android-panel/): the built panel is copied into the
+# APK's assets by `bun run android:assets`, so it is generated, not source.
+android-panel/app/src/main/assets/panel/*
+!android-panel/app/src/main/assets/panel/.gitkeep
+android-panel/build/
+android-panel/app/build/
+android-panel/.gradle/
+android-panel/local.properties
+android-panel/keystore/
+*.apk

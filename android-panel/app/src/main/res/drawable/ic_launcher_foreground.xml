@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A control panel: one accent rail, three rows. Drawn inside the 72dp safe
+     zone of the 108dp adaptive-icon canvas. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#7DD3FC"
+        android:pathData="M26,34 H32 V74 H26 Z" />
+
+    <path
+        android:fillColor="#DCE6F5"
+        android:pathData="M38,34 H80 V44 H38 Z M38,48 H72 V58 H38 Z M38,62 H58 V72 H38 Z" />
+</vector>

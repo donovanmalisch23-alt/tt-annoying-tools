@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.WebbyPanel" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/panel_background</item>
+        <item name="android:colorBackground">@color/panel_background</item>
+        <item name="android:statusBarColor">@color/panel_background</item>
+        <item name="android:navigationBarColor">@color/panel_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:textColorPrimary">@color/panel_text</item>
+        <item name="android:textColorSecondary">@color/panel_text_dim</item>
+    </style>
+
+    <style name="Widget.Panel.Action" parent="@android:style/Widget.Material.Button.Borderless">
+        <item name="android:textColor">@color/panel_accent</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">36dp</item>
+        <item name="android:paddingStart">6dp</item>
+        <item name="android:paddingEnd">6dp</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+</resources>
