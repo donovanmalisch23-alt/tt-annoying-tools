@@ -45,6 +45,18 @@ object Sdk {
         }
     }
 
+    /** True when the native library for this device's ABI loaded successfully. */
+    fun isAvailable(): Boolean = runCatching { ensureLoaded() }.isSuccess
+
+    /**
+     * One line for the UI, e.g. `TeamTalk 5 SDK 5.22a (on device)`. The SDK runs
+     * inside this process — there is no desktop bridge or helper process behind
+     * the tools.
+     */
+    fun statusLine(): String =
+        if (isAvailable()) "TeamTalk 5 SDK ${runCatching { version() }.getOrDefault("?")} · on device"
+        else "TeamTalk 5 SDK not loaded"
+
     /**
      * Activates a purchased SDK license key. No-op when no name is configured,
      * so trial builds behave exactly as before.

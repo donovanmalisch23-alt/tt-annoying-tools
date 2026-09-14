@@ -9,11 +9,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -21,6 +26,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -39,6 +45,7 @@ import com.teamtalk.annoying.ui.components.InfoCard
 import com.teamtalk.annoying.ui.components.LabeledTextField
 import com.teamtalk.annoying.ui.components.SectionTitle
 import com.teamtalk.annoying.ui.components.ToggleRow
+import com.teamtalk.annoying.ui.components.toolIcon
 
 @Composable
 fun ToolScreen(viewModel: AppViewModel, navController: NavController, toolId: String) {
@@ -67,7 +74,21 @@ fun ToolScreen(viewModel: AppViewModel, navController: NavController, toolId: St
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
     ) {
-        Text(spec.title, style = MaterialTheme.typography.headlineMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                contentColor = MaterialTheme.colorScheme.primary,
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Icon(
+                    imageVector = toolIcon(spec.id),
+                    contentDescription = null,
+                    modifier = Modifier.padding(10.dp).size(24.dp),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(spec.title, style = MaterialTheme.typography.headlineSmall)
+        }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Badge(if (spec.soft) "gentle" else "heavy load", MaterialTheme.colorScheme.secondary)
@@ -83,22 +104,23 @@ fun ToolScreen(viewModel: AppViewModel, navController: NavController, toolId: St
         if (!viewModel.licenseAccepted) {
             InfoCard(
                 title = "SDK license not accepted",
-                body = "Accept the TeamTalk 5 SDK license on the Tools tab before running anything.",
+                body = "Accept the TeamTalk 5 SDK license in the admin panel before running " +
+                    "anything.",
                 accent = MaterialTheme.colorScheme.secondary,
             )
         }
         if (hostMissing) {
             InfoCard(
                 title = "No server configured",
-                body = "Set the server host on the Server tab first.",
+                body = "Set the server host in the admin panel first.",
                 accent = MaterialTheme.colorScheme.secondary,
             )
         }
         if (spec.requiresWhitelist) {
             InfoCard(
                 title = "Allowlist required",
-                body = "This test refuses any host that is not listed on the Allowlist tab. " +
-                    "Currently ${viewModel.whitelistEntries.size} host(s) are allowed.",
+                body = "This test refuses any host that is not on the admin panel's " +
+                    "allowlist. Currently ${viewModel.whitelistEntries.size} host(s) are allowed.",
             )
         }
 

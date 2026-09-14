@@ -13,7 +13,8 @@
     "bridge-check": "bun scripts/bridge-check.ts",
     "render-check": "bun scripts/render-check.ts",
     "android-check": "bun scripts/android-panel-check.ts",
-    "check": "tsc --noEmit && bun scripts/smoke.ts && bun scripts/bridge-check.ts && bun scripts/render-check.ts && bun scripts/android-panel-check.ts",
+    "android-app-check": "bun scripts/android-app-check.ts",
+    "check": "tsc --noEmit && bun scripts/smoke.ts && bun scripts/bridge-check.ts && bun scripts/render-check.ts && bun scripts/android-panel-check.ts && bun scripts/android-app-check.ts",
     "icons": "node scripts/gen-icons.mjs",
     "android:assets": "bun run build && bun scripts/android-panel-assets.ts",
     "android:apk": "bun run android:assets && cd android-panel && gradle assembleDebug"

@@ -31,6 +31,13 @@ android {
         // always know which build they are running.
         buildConfigField("String", "RELEASE_CHANNEL", "\"alpha-soft\"")
         buildConfigField("String", "SDK_VERSION_URL", "\"https://bearware.dk/?page_id=419\"")
+
+        // Only the ABIs whose SDK libraries are dropped into src/main/jniLibs are
+        // packaged. arm64-v8a covers every phone this alpha targets; add another
+        // ABI here (and its .so) to build for it.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -83,6 +90,13 @@ android {
             "/META-INF/DEPENDENCIES",
             "/META-INF/LICENSE*",
         )
+
+        // The TeamTalk SDK libraries carry a lot of debug data, so keeping them
+        // compressed in the APK roughly halves the download. They are extracted
+        // during install instead of being mapped straight from the archive.
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     // Native TeamTalk SDK libraries live here, one folder per ABI,

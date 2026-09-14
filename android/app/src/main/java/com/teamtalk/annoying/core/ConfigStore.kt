@@ -67,6 +67,59 @@ class ConfigStore(context: Context) {
         prefs.edit().putBoolean(KEY_LICENSE_ACCEPTED, accepted).apply()
     }
 
+    // ----- admin credential (see AdminAuth) --------------------------------- //
+
+    fun loadAdminRecord(): AdminRecord? {
+        val user = prefs.getString(KEY_ADMIN_USER, null) ?: return null
+        val hash = prefs.getString(KEY_ADMIN_HASH, null) ?: return null
+        val salt = prefs.getString(KEY_ADMIN_SALT, null) ?: return null
+        val algorithm = prefs.getString(KEY_ADMIN_ALGO, null) ?: return null
+        return AdminRecord(
+            username = user,
+            algorithm = algorithm,
+            iterations = prefs.getInt(KEY_ADMIN_ITERATIONS, 120_000),
+            saltB64 = salt,
+            hashB64 = hash,
+        )
+    }
+
+    fun saveAdminRecord(record: AdminRecord) {
+        prefs.edit()
+            .putString(KEY_ADMIN_USER, record.username)
+            .putString(KEY_ADMIN_ALGO, record.algorithm)
+            .putInt(KEY_ADMIN_ITERATIONS, record.iterations)
+            .putString(KEY_ADMIN_SALT, record.saltB64)
+            .putString(KEY_ADMIN_HASH, record.hashB64)
+            .apply()
+    }
+
+    fun clearAdminRecord() {
+        prefs.edit()
+            .remove(KEY_ADMIN_USER)
+            .remove(KEY_ADMIN_ALGO)
+            .remove(KEY_ADMIN_ITERATIONS)
+            .remove(KEY_ADMIN_SALT)
+            .remove(KEY_ADMIN_HASH)
+            .apply()
+    }
+
+    fun loadFailedAttempts(): Int = prefs.getInt(KEY_ADMIN_FAILURES, 0)
+
+    fun saveFailedAttempts(count: Int) {
+        prefs.edit().putInt(KEY_ADMIN_FAILURES, count).apply()
+    }
+
+    fun loadLockUntilMs(): Long = prefs.getLong(KEY_ADMIN_LOCK_UNTIL, 0L)
+
+    fun saveLockUntilMs(value: Long) {
+        prefs.edit().putLong(KEY_ADMIN_LOCK_UNTIL, value).apply()
+    }
+
+    /** Wipes the allowlist back to its documented empty state. */
+    fun resetWhitelist() {
+        prefs.edit().putString(KEY_WHITELIST, DEFAULT_WHITELIST).apply()
+    }
+
     private companion object {
         const val DEFAULT_WHITELIST =
             "# Exact TeamTalk hostnames or IP addresses allowed to be tested.\n" +
@@ -90,5 +143,12 @@ class ConfigStore(context: Context) {
         const val KEY_LICENSE_KEY = "license_key"
         const val KEY_LICENSE_ACCEPTED = "license_accepted"
         const val KEY_WHITELIST = "whitelist"
+        const val KEY_ADMIN_USER = "admin_user"
+        const val KEY_ADMIN_ALGO = "admin_algo"
+        const val KEY_ADMIN_ITERATIONS = "admin_iterations"
+        const val KEY_ADMIN_SALT = "admin_salt"
+        const val KEY_ADMIN_HASH = "admin_hash"
+        const val KEY_ADMIN_FAILURES = "admin_failures"
+        const val KEY_ADMIN_LOCK_UNTIL = "admin_lock_until"
     }
 }

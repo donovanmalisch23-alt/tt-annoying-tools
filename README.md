@@ -484,7 +484,8 @@ bun run dev        # http://localhost:5173
 | Live-mode client, store and preview-proxy checks (headless) | `bun run bridge-check` |
 | Screen render check (headless) | `bun run render-check` |
 | Android wrapper checks (headless) | `bun run android-check` |
-| All five | `bun run check` |
+| Native Android app checks (headless) | `bun run android-app-check` |
+| All six | `bun run check` |
 | Production build into `dist/` | `bun run build` |
 | Regenerate the PWA icons | `bun run icons` |
 | Build the panel and copy it into the APK's assets | `bun run android:assets` |
@@ -740,24 +741,57 @@ and every version-catalog alias, confirms the manifest's activity exists, and
 checks the seams between the wrapper and the panel (the `localStorage` key, the
 port range, the asset directory, the theme colour).
 
-## Android (alpha-soft)
+## Android (alpha-soft) — the native app
 
-An experimental native Android port of this suite lives in `android/`: Kotlin +
-Jetpack Compose on top of BearWare's TeamTalk **Java** SDK, with every tool here
-ported (message/login/leave-join tests, idle bots, the response bot, the
-combined suite, the local flood test, and the ramp test). It is an alpha aimed
-at a small tester group.
+`android/` is the native Android port of this suite: Kotlin + Jetpack Compose on
+top of BearWare's TeamTalk **Java** SDK, with every tool here ported (message and
+login/leave-join tests, idle bots, the response bot, the combined suite, the
+local flood test, and the ramp test). It is an alpha aimed at a small tester
+group.
 
-It is **not** a copy of `sdk/`: the TeamTalk Android SDK must be supplied by the
-builder, and the build requires an Android SDK/Gradle toolchain that this
-repository does not bundle. See [`android/README.md`](android/README.md) for the
-SDK drop-in paths, the build commands, and installation on test devices. (The
-`android-panel/` wrapper above is unrelated — it ships the web panel, needs no
-SDK, and always builds.)
+The SDK runs **inside the app**: the Java bindings and the per-ABI
+`libTeamTalk5-jni.so` are linked into the APK, so every connection is opened from
+the process the tester is holding. No desktop bridge, no helper process, no
+loopback server in the path. (`android-panel/` above is the opposite trade — it
+ships the web panel and reaches live mode through the Python bridge on a
+desktop.)
+
+The Tools page opens with the tool list under a plain **"Select a tool below"**
+heading: eight rows, grouped into gentle and heavy-load tests, each showing the
+gates it will demand. At the bottom of that page is the **admin panel** — the
+allowlist, the target server, the SDK license and the reset actions, behind an
+administrator credential set on first run (PBKDF2-HMAC-SHA256, per-install salt,
+lockout after five failed attempts) and re-locked on every restart.
+
+The TeamTalk Android SDK is **not** committed here — its license does not allow
+redistribution — so the build expects it locally:
+
+```bash
+curl -LO https://www.bearware.dk/teamtalksdk/v5.22a/tt5sdk_v5.22a_android.7z
+7z x tt5sdk_v5.22a_android.7z
+cp tt5sdk_v5.22a_android/Client/TeamTalkAndroid/libs/TeamTalk5.jar android/app/libs/
+mkdir -p android/app/src/main/jniLibs/arm64-v8a
+cp tt5sdk_v5.22a_android/Client/TeamTalkAndroid/src/main/jniLibs/arm64-v8a/*.so \
+   android/app/src/main/jniLibs/arm64-v8a/
+```
+
+`android/app/libs/*.jar` and `android/app/src/main/jniLibs/**` are gitignored,
+so the SDK never lands in a commit. Then:
+
+```bash
+cd android && gradle assembleDebug     # -> app/build/outputs/apk/debug/app-debug.apk
+bun run android-app-check              # structural checks for the native app
+```
+
+Only `arm64-v8a` is packaged (`ndk.abiFilters` in `android/app/build.gradle.kts`);
+add an ABI there plus its `.so` here to widen it. The SDK libraries stay
+compressed inside the APK, which roughly halves the download.
 
 The same safety gates apply — an exact-host allowlist, an explicit confirmation
 for the heavy tools, the local-only check for the flood test, and a benign
-response bot.
+response bot — and the allowlist itself is only editable by the administrator.
+See [`android/README.md`](android/README.md) for the build, the credential and
+installation on test devices.
 
 ## Credits
 

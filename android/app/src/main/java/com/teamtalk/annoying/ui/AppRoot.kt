@@ -1,13 +1,12 @@
 package com.teamtalk.annoying.ui
 
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -31,21 +30,24 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.teamtalk.annoying.core.LicenseGate
 import com.teamtalk.annoying.ui.screens.AboutScreen
-import com.teamtalk.annoying.ui.screens.ConnectionScreen
+import com.teamtalk.annoying.ui.screens.AdminScreen
 import com.teamtalk.annoying.ui.screens.HomeScreen
 import com.teamtalk.annoying.ui.screens.LogScreen
 import com.teamtalk.annoying.ui.screens.ToolScreen
-import com.teamtalk.annoying.ui.screens.WhitelistScreen
 
+/**
+ * Three destinations in the bar; everything that changes how the app behaves
+ * (allowlist, target, SDK) lives behind the admin panel, which is reached from
+ * the bottom of the Tools page.
+ */
 private enum class Dest(val route: String, val label: String, val icon: ImageVector) {
-    Home("home", "Tools", Icons.Filled.Home),
+    Tools("home", "Tools", Icons.Filled.Home),
     Log("log", "Log", Icons.Filled.PlayArrow),
-    Connection("connection", "Server", Icons.Filled.Settings),
-    Allowlist("allowlist", "Allowlist", Icons.Filled.Lock),
     About("about", "About", Icons.Filled.Info),
 }
 
 const val ROUTE_TOOL_PREFIX = "tool/"
+const val ROUTE_ADMIN = "admin"
 
 @Composable
 fun AppRoot() {
@@ -59,7 +61,7 @@ fun AppRoot() {
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                Dest.values().forEach { destination ->
+                Dest.entries.forEach { destination ->
                     NavigationBarItem(
                         selected = currentRoute == destination.route,
                         onClick = {
@@ -79,14 +81,13 @@ fun AppRoot() {
     ) { padding ->
         NavHost(
             navController = navController,
-            startDestination = Dest.Home.route,
+            startDestination = Dest.Tools.route,
             modifier = Modifier.padding(padding),
         ) {
-            composable(Dest.Home.route) { HomeScreen(viewModel, navController) }
+            composable(Dest.Tools.route) { HomeScreen(viewModel, navController) }
             composable(Dest.Log.route) { LogScreen() }
-            composable(Dest.Connection.route) { ConnectionScreen(viewModel) }
-            composable(Dest.Allowlist.route) { WhitelistScreen(viewModel) }
             composable(Dest.About.route) { AboutScreen(viewModel) }
+            composable(ROUTE_ADMIN) { AdminScreen(viewModel, navController) }
             composable("$ROUTE_TOOL_PREFIX{id}") { entry ->
                 val toolId = entry.arguments?.getString("id").orEmpty()
                 ToolScreen(viewModel, navController, toolId)

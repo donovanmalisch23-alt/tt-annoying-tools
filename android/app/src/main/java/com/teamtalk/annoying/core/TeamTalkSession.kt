@@ -190,7 +190,9 @@ class TeamTalkSession(
             throw TeamTalkException("Could not retrieve TeamTalk channels: ${t.message}", t)
         }
         return channels.mapNotNull { channel ->
-            val id = channel.nChannelID
+            // The Java binding exposes the array as a platform type, so the
+            // element is only known to be possibly-null here.
+            val id = channel?.nChannelID ?: return@mapNotNull null
             if (id < 0) return@mapNotNull null
             val name = channel.szName ?: ""
             val path = evaluateText { client.getChannelPath(id) } ?: ""
@@ -222,7 +224,7 @@ class TeamTalkSession(
         }
         val ownId = evaluate { client.getMyUserID() }
         return users.mapNotNull { user ->
-            val id = user.nUserID
+            val id = user?.nUserID ?: return@mapNotNull null
             if (id < 0 || (!includeSelf && id == ownId)) return@mapNotNull null
             val channel = user.nChannelID
             UserInfo(

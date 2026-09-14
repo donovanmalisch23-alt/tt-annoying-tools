@@ -38,3 +38,19 @@ android-panel/.gradle/
 android-panel/local.properties
 android-panel/keystore/
 *.apk
+
+# Native Android app (android/): the TeamTalk 5 SDK is not redistributed here.
+# Drop TeamTalk5.jar and the per-ABI libTeamTalk5-jni.so in locally (see
+# android/README.md) and everything it adds stays out of git.
+android/app/libs/*.jar
+android/app/libs/*.aar
+android/app/src/main/jniLibs/**
+!android/app/src/main/jniLibs/**/README.md
+android/app/build/
+android/.gradle/
+# The app copies sdk/License.txt into its assets at build time, so there is no
+# second copy of the license text in git.
+android/app/src/main/assets/teamtalk-sdk-license.txt
+android/local.properties
+android/gradle/wrapper/gradle-wrapper.jar
+android/*.keystore

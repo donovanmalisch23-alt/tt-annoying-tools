@@ -28,6 +28,7 @@
     "scripts/browser-shim.ts",
     "scripts/vite-webby.ts",
     "scripts/android-panel-assets.ts",
-    "scripts/android-panel-check.ts"
+    "scripts/android-panel-check.ts",
+    "scripts/android-app-check.ts"
   ]
 }

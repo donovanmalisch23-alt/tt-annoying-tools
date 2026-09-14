@@ -493,6 +493,12 @@ private class StageResult(val stage: RampStage) {
     var detail: String = ""
     val during = mutableListOf<ProbeResult>()
     val after = mutableListOf<ProbeResult>()
+
+    /** One-line stage report, e.g. `stage 2: 2 thread(s), both, 10s — degraded: ...`. */
+    fun line(): String {
+        val base = "${stage.label()} — $verdict"
+        return if (detail.isBlank()) base else "$base: $detail"
+    }
 }
 
 /** Ramped breaking-point test: tt_ramp.py. */
