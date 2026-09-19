@@ -442,6 +442,64 @@ class TestSendOnSession:
         assert rc == 0
         assert session.private_messages == [("psst", 4), ("psst", 77)]
 
+    def test_private_never_online_name_is_skipped(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        # A mistyped --user name was never online, so there is no logout to
+        # wait out: the run skips the recipient instead of parking forever.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        monkeypatch.setattr(mod, "USER_RETURN_POLL_SECONDS", 0.0)
+        session.users = [{"id": 4, "username": "bob", "nickname": "Bob"}]
+        rc = mod.send_messages_on_session(
+            session=session, message="psst", count=1, interval=0, wait=0,
+            target="private", recipient_names=["amy"],
+        )
+        assert rc == 0
+        assert session.private_messages == []
+        assert "skipping them this round" in capsys.readouterr().out
+
+    def test_private_logout_mid_run_waits_for_return(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        # amy is online, then logs out after her first message and relogs with
+        # a fresh ID: the send pauses on the server for the username instead
+        # of ending the run, then the rest goes to the new ID — the count
+        # neither restarts nor overruns.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = [{"id": 4, "username": "amy", "nickname": "Amy"}]
+        monkeypatch.setattr(mod, "USER_RETURN_POLL_SECONDS", 0.0)
+
+        real_send = session.send_private_message
+        real_list = session.list_users
+        misses = {"n": 0}
+
+        def send_then_logout(message, user_id):
+            result = real_send(message, user_id)
+            session.users = []  # she logged out right after this message
+            return result
+
+        def list_until_return(include_self=False):
+            if session.users:
+                return real_list(include_self)
+            misses["n"] += 1
+            if misses["n"] >= 2:  # she logs back in while we wait
+                session.users = [{"id": 44, "username": "amy", "nickname": "Amy"}]
+            return real_list(include_self)
+
+        session.send_private_message = send_then_logout
+        session.list_users = list_until_return
+
+        rc = mod.send_messages_on_session(
+            session=session, message="psst", count=2, interval=0, wait=0,
+            target="private", recipient_names=["amy"],
+        )
+        assert rc == 0
+        assert session.private_messages == [("psst", 4), ("psst", 44)]
+        out = capsys.readouterr().out
+        assert "logged out" in out and "is back as user ID 44" in out
+
     def test_name_display_enriched_from_roster(self, tool_session_factory, capsys):
         # A name-keyed recipient prints with its roster label, not the raw
         # typed text.

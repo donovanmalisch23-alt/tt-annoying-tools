@@ -55,6 +55,9 @@ DEFAULT_JOIN_LEAVE_CYCLES = 0
 # Upper bound on consecutive failed sends to a single target before the run
 # gives up on it — reconnects after kicks are retried, but not forever.
 MAX_CONSECUTIVE_FAILURES = 3
+# How often the wait-for-return loop re-scans the roster for a logged-out
+# target's username.
+USER_RETURN_POLL_SECONDS = 2.0
 
 
 def normalize_host(host: str) -> str:
@@ -577,20 +580,36 @@ def run_private_operations(
     reconnect — so a relogged user is still found by username and the list is
     never restarted: every target receives exactly ``message_count`` messages
     in total.  An interrupted send is retried (against the fresh ID) rather
-    than counted.
+    than counted.  A target who logs out mid-run pauses the run instead of
+    ending it: sending stops on the first failed round and the session waits
+    on the server for their username to return, then their remaining messages
+    go to the fresh ID.  A target that has not been online once this run (a
+    mistyped name, say) has nothing to wait for and is skipped instead, so
+    the run still finishes.
     """
 
     misses = 0  # consecutive failed sends; bounds retry storms on a dead target
+    seen_online: set[str] = set()  # targets resolved at least once this run
     for message_index in range(message_count):
         for recipient_index, (key, display) in enumerate(targets, start=1):
             while True:
                 user_id = _lookup_user_id(session, key)
                 if user_id is None:
-                    print(
-                        f"Private message {message_index + 1}/{message_count}: "
-                        f"{display} is not online; skipping them this round."
-                    )
-                    break
+                    # A target that was online earlier has now logged out:
+                    # stop sending and park until the username returns instead
+                    # of skipping rounds.  A target that was never online this
+                    # run cannot be "returned to", so skip the round as before
+                    # rather than waiting forever.
+                    if key not in seen_online:
+                        print(
+                            f"Private message {message_index + 1}/{message_count}: "
+                            f"{display} is not online; skipping them this round."
+                        )
+                        break
+                    user_id = _wait_for_user_id(session, key, display)
+                    if user_id is None:
+                        return False
+                seen_online.add(key)
                 try:
                     session.send_private_message(message, user_id)
                 except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
@@ -681,6 +700,51 @@ def _lookup_user_id(session: TeamTalkSession, key: str) -> Optional[int]:
     return None
 
 
+def _wait_for_user_id(
+    session: TeamTalkSession,
+    key: str,
+    display_name: str,
+    *,
+    tag: str = "",
+    stop_event: Optional[threading.Event] = None,
+) -> Optional[int]:
+    """Park on the server until a logged-out target comes back by name.
+
+    One failed lookup means the target logged out mid-run: sending stops
+    immediately and the session stays connected, re-scanning the roster for
+    the USERNAME — never the server-assigned ID, which changes on every
+    login — until they log back in.  Returns their fresh user ID to resume
+    with, or None when the connection cannot be recovered or ``stop_event``
+    fires.  Ctrl+C still exits the run while waiting.
+    """
+
+    prefix = f"[{tag}] " if tag else ""
+    print(
+        f"{prefix}{display_name} logged out; waiting on the server for the "
+        f"username {key!r} to return (checking every "
+        f"{USER_RETURN_POLL_SECONDS:g}s; no messages will be sent until then)."
+    )
+    while True:
+        try:
+            user_id = _lookup_user_id(session, key)
+        except (TeamTalkError, TeamTalkConfigurationError, OSError):
+            user_id = None
+        if user_id is not None:
+            print(f"{prefix}{display_name} is back as user ID {user_id}; resuming.")
+            return user_id
+        if stop_event is not None and stop_event.is_set():
+            return None
+        if not session.is_online():
+            if not session.check_and_reconnect():
+                print(f"{prefix}could not reconnect; giving up on {display_name}.")
+                return None
+        if stop_event is not None:
+            if stop_event.wait(USER_RETURN_POLL_SECONDS):
+                return None
+        else:
+            time.sleep(USER_RETURN_POLL_SECONDS)
+
+
 def _select_targets(
     users: Sequence[dict[str, Any]],
     all_users: bool,
@@ -759,21 +823,43 @@ def _send_to_user(
     every send (and re-resolved after each reconnect) because IDs change on
     every login.  A kick mid-run re-sends only the interrupted message — the
     delivered total stays exactly ``count``, never restarts at 1, never
-    exceeds it.  Returns True when all ``count`` messages were delivered.
+    exceeds it.  A user who logs out mid-run does not end the bot: sending
+    stops on the first failed round and the bot waits on the server for the
+    username to return, then delivers the remaining messages against the
+    fresh ID.  A user who was never online this run (a mistyped name, say)
+    cannot be waited for, so the bot drops their remaining messages and moves
+    on.  Returns True when all ``count`` messages were delivered.
     """
 
     sent = 0
     misses = 0
+    seen_online = False  # True once this run resolved the name at least once
     while sent < count:
         if stop_event.is_set():
             return False
         user_id = _lookup_user_id(session, key)
         if user_id is None:
-            print(
-                f"[user-bot] {display_name} is no longer online; "
-                f"dropping the {count - sent} message(s) left for them."
+            if not seen_online:
+                # Never online this run: there is no logout to wait out, so
+                # drop the target instead of parking the bot forever.
+                print(
+                    f"[user-bot] {display_name} is not online; "
+                    f"dropping the {count - sent} message(s) left for them."
+                )
+                return False
+            # The user was online and has now logged out: stop sending and
+            # wait for the username to return instead of dropping the
+            # remaining messages and killing the bot.
+            user_id = _wait_for_user_id(
+                session, key, display_name, tag="user-bot", stop_event=stop_event
             )
-            return False
+            if user_id is None:
+                if stop_event.is_set():
+                    return False
+                # The connection was lost while waiting; the bot cannot
+                # continue on a dead session.
+                raise _BotStop
+        seen_online = True
         try:
             session.send_private_message(message, user_id)
         except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:

@@ -678,6 +678,46 @@ class TestRunPrivateOperations:
         assert session.private_messages == [("ping", 7)]
         assert "not online; skipping" in capsys.readouterr().out
 
+    def test_logout_mid_run_waits_for_return(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        # amy is online, then logs out after her first message and comes back
+        # with a brand-new ID: the run parks on the server for the username
+        # instead of skipping her, then delivers the rest against the fresh ID.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = self._roster((5, "amy"))
+        monkeypatch.setattr(tt_suite, "USER_RETURN_POLL_SECONDS", 0.0)
+
+        real_send = session.send_private_message
+        real_users = session.list_users
+        misses = {"n": 0}
+
+        def send_then_logout(message, user_id):
+            result = real_send(message, user_id)
+            session.users = []  # she logged out right after this message
+            return result
+
+        def users_until_return(include_self=False):
+            if session.users:
+                return real_users(include_self)
+            misses["n"] += 1
+            if misses["n"] >= 2:  # she logs back in while we wait
+                session.users = self._roster((55, "amy"))
+            return real_users(include_self)
+
+        session.send_private_message = send_then_logout
+        session.list_users = users_until_return
+
+        assert tt_suite.run_private_operations(
+            session, [("amy", "Amy")],
+            message="ping", message_count=2, interval=0,
+        ) is True
+        assert session.private_messages == [("ping", 5), ("ping", 55)]
+        out = capsys.readouterr().out
+        assert "logged out" in out and "is back as user ID 55" in out
+        assert "skipping" not in out
+
 
 # --------------------------------------------------------------------------- #
 # Bots
@@ -790,6 +830,57 @@ class TestUserBot:
         ) is True
         assert session.private_messages == [("m", 55), ("m", 55)]
         assert session.reconnect_calls == 1
+
+    def test_send_to_user_waits_out_a_logout(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        # A user who was online and then logs out does not cost the bot its
+        # run: sending pauses on the server until the username comes back,
+        # then the remaining messages go to the fresh ID.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = self._roster((5, "amy"))
+        monkeypatch.setattr(tt_suite, "USER_RETURN_POLL_SECONDS", 0.0)
+
+        real_send = session.send_private_message
+        real_users = session.list_users
+        misses = {"n": 0}
+
+        def send_then_logout(message, user_id):
+            result = real_send(message, user_id)
+            session.users = []
+            return result
+
+        def users_until_return(include_self=False):
+            if session.users:
+                return real_users(include_self)
+            misses["n"] += 1
+            if misses["n"] >= 2:
+                session.users = self._roster((55, "amy"))
+            return real_users(include_self)
+
+        session.send_private_message = send_then_logout
+        session.list_users = users_until_return
+
+        assert tt_suite._send_to_user(
+            session, "amy", "Amy", "m", 2, 0, threading.Event()
+        ) is True
+        assert session.private_messages == [("m", 5), ("m", 55)]
+        assert "is back as user ID 55" in capsys.readouterr().out
+
+    def test_send_to_user_never_online_is_dropped(
+        self, tool_session_factory, capsys
+    ):
+        # A target that was never online this run (a mistyped name, say) has
+        # no logout to wait out: the bot drops it instead of parking forever.
+        factory, _created = tool_session_factory
+        session = factory()(None)
+        session.users = self._roster((7, "bob"))  # amy never online
+        assert tt_suite._send_to_user(
+            session, "amy", "Amy", "m", 2, 0, threading.Event()
+        ) is False
+        assert session.private_messages == []
+        assert "dropping the 2 message(s)" in capsys.readouterr().out
 
     def test_send_to_user_gives_up_after_consecutive_failures(
         self, tool_session_factory, capsys

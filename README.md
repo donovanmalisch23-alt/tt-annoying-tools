@@ -50,7 +50,8 @@ python3 local_server/start.py
 ```
 
 The local server uses `loadtest/loadtest` and creates `/LoadTest`. The Python
-tools load those defaults automatically. You can pass the same values as
+tools default to a blank password; to log in as that account, set
+`TT_PASSWORD=loadtest` (in `teamtalk.env` or the shell) or pass the values as
 command-line options. For a nonstandard SDK layout, use
 `--sdk-python /path/to/TeamTalk5.py` and `--sdk-library
 /path/to/libTeamTalk5.so`.

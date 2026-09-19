@@ -417,6 +417,10 @@ def send_messages(
 # after kicks are retried, but not forever.
 MAX_CONSECUTIVE_FAILURES = 3
 
+# How often the wait-for-return loop re-scans the roster for a logged-out
+# recipient's username.
+USER_RETURN_POLL_SECONDS = 2.0
+
 
 def _user_key(user) -> str:
     """Stable identity for a user: username (never the server-assigned ID)."""
@@ -497,6 +501,37 @@ def _current_user_id(session: TeamTalkSession, recipient) -> Optional[int]:
     return None
 
 
+def _wait_for_user_return(session: TeamTalkSession, recipient) -> Optional[int]:
+    """Park on the server until a logged-out recipient comes back by name.
+
+    One failed lookup means the recipient logged out mid-run: sending stops
+    immediately and the session stays connected, re-scanning the roster for
+    the USERNAME — never the server-assigned ID, which changes on every
+    login — until they log back in.  Returns their fresh user ID to resume
+    with, or None when the connection cannot be recovered.  Ctrl+C still
+    exits the run while waiting.
+    """
+
+    print(
+        f"{recipient['display']} logged out; waiting on the server for the "
+        f"username to return (checking every {USER_RETURN_POLL_SECONDS:g}s, "
+        "no messages will be sent until then)."
+    )
+    while True:
+        try:
+            user_id = _current_user_id(session, recipient)
+        except (TeamTalkError, TeamTalkConfigurationError, OSError):
+            user_id = None
+        if user_id is not None:
+            print(f"{recipient['display']} is back as user ID {user_id}; resuming.")
+            return user_id
+        if not session.is_online():
+            if not session.check_and_reconnect():
+                print("Could not reconnect; stopping message test.")
+                return None
+        time.sleep(USER_RETURN_POLL_SECONDS)
+
+
 def _name_recipients(recipient_names: Sequence[str]) -> list[dict[str, object]]:
     """Build recipient entries from --user names; no roster lookup needed.
 
@@ -546,7 +581,12 @@ def send_messages_on_session(
     Only delivered messages count: a kick retries the interrupted send after
     reconnecting (re-resolving the recipient's fresh ID by username), so each
     recipient gets exactly ``count`` messages — the run never restarts the
-    numbering or multiplies the totals.
+    numbering or multiplies the totals.  A recipient who logs out mid-run
+    pauses the run instead of ending it: sending stops on the first failed
+    round and the session waits on the server for their username to return,
+    then the remaining messages go to their fresh ID.  A name recipient who
+    was never online this run (a typo, say) has nothing to wait for and is
+    skipped instead, so the run still finishes.
     """
 
     if wait:
@@ -596,11 +636,24 @@ def send_messages_on_session(
             while True:
                 user_id = _current_user_id(session, recipient)
                 if user_id is None:
-                    print(
-                        f"{recipient['display']} is not online; "
-                        "skipping them this round."
-                    )
-                    break
+                    # An anonymous recipient (raw ID only) has no name to be
+                    # re-found by, and a name that was never online this run
+                    # (a typo, say) has no logout to wait out: skip either
+                    # rather than parking the run forever.  A recipient who
+                    # was online earlier and logged out stops the sending and
+                    # waits for the username to return.
+                    if not str(recipient.get("key") or "") or not recipient.get(
+                        "seen_online"
+                    ):
+                        print(
+                            f"{recipient['display']} is not online; "
+                            "skipping them this round."
+                        )
+                        break
+                    user_id = _wait_for_user_return(session, recipient)
+                    if user_id is None:
+                        return 1
+                recipient["seen_online"] = True
                 try:
                     session.send_private_message(message, user_id)
                 except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
