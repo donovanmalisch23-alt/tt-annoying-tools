@@ -19,6 +19,9 @@ env/
 typescript
 .change-ip-state
 
+# Per-tool local state (project id), not source.
+.freebuff/
+
 # Web panel (Vite + React PWA).
 node_modules/
 dist/
