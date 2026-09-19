@@ -15,6 +15,13 @@ the sole authorization gate (same as the rest of the suite), so a whitelisted
 server does not have to be this machine.  ``--confirm`` is still required on the
 flag path to spawn any flood, and ``--dry-run`` prints the full stage plan
 without starting anything.
+
+The SDK service probe is optional and never gates the flood.  ``--no-probe``
+runs the raw TCP/UDP flood with no login at all, and if the probe cannot log in
+(or the target does not answer) the ramp automatically falls back to that
+flood-only mode: stages are reported as ``unmeasured`` with their flood stats
+instead of being mislabelled broken.  Only the measurements are lost, never the
+run.
 The per-stage flood length is bounded by ``tt_loic``'s existing ceiling (60 s),
 and the ramp's thread count by its own ``RAMP_MAX_THREADS`` (default 64,
 maximum 1024).  Each stage can also carry its own flood length with
@@ -277,6 +284,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="channel the probe joins and messages (default: /LoadTest)",
     )
     parser.add_argument(
+        "--no-probe", action="store_true",
+        help="skip the SDK service probe and its login entirely: run the raw "
+        "TCP/UDP flood and report flood stats only (the probe is also skipped "
+        "automatically when it cannot log in)",
+    )
+    parser.add_argument(
         "--whitelist",
         default=os.environ.get("TT_WHITELIST", str(DEFAULT_WHITELIST)),
         help=f"server whitelist path (default: {DEFAULT_WHITELIST})",
@@ -480,6 +493,21 @@ def classify_stage(stage: StageResult, baseline_median: Optional[float]) -> None
             stage.detail = f"RTT {ratio:.1f}x baseline"
         else:
             stage.detail = "all probes ok"
+
+
+def _finalize(
+    result: StageResult, flood_only: bool, baseline_median: Optional[float]
+) -> None:
+    """Classify a stage, or mark it unmeasured when no probe was used.
+
+    A flood-only stage has no probe samples by design, so classifying it would
+    report it as broken; the honest label is ``unmeasured``.
+    """
+    if flood_only:
+        result.verdict = "unmeasured"
+        result.detail = "flood-only; no SDK probe"
+    else:
+        classify_stage(result, baseline_median)
 
 
 # --------------------------------------------------------------------------- #
@@ -706,6 +734,11 @@ def _dry_run_plan(args: argparse.Namespace, stages: list[RampStage]) -> str:
     frame = (
         f"{args.total_time:g}s (stages sized to fill it)" if args.total_time else None
     )
+    probe_line = (
+        "skipped (--no-probe; flood only)"
+        if getattr(args, "no_probe", False)
+        else f"channel {args.probe_channel!r}, user {args.probe_username!r}"
+    )
     lines = [
         "tt_ramp dry run — nothing will be flooded. Planned stages:",
         f"  target      : {args.host}:{args.tcp_port} (udp {args.udp_port})",
@@ -716,7 +749,7 @@ def _dry_run_plan(args: argparse.Namespace, stages: list[RampStage]) -> str:
         lines.append(f"  time frame  : {frame}")
     lines += [
         f"  max run time: {max_time}",
-        f"  probe       : channel {args.probe_channel!r}, user {args.probe_username!r}",
+        f"  probe       : {probe_line}",
         f"  whitelist   : {args.whitelist}",
         f"  stages      : {len(stages)}",
     ]
@@ -738,6 +771,9 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     probe: Optional[ServiceProbe] = None
+    # The probe never gates the flood: --no-probe starts flood-only, and a
+    # probe that cannot log in or reach the target also drops to flood-only.
+    flood_only = bool(getattr(args, "no_probe", False))
     baseline: list[ProbeResult] = []
     results: list[StageResult] = []
     stop_event = threading.Event()
@@ -777,28 +813,52 @@ def run(args: argparse.Namespace) -> int:
         pass
 
     try:
-        probe = ServiceProbe(args)
-        probe.start()
-        for index in range(BASELINE_PROBES):
-            if stop_event.is_set():
-                break
-            result = probe.probe("before")
-            baseline.append(result)
-            print(result.line(index + 1))
-            time.sleep(0.2)
-        if baseline and all(p.connect_ms is None for p in baseline):
-            raise TeamTalkError(
-                f"nothing is listening on {host}:{args.tcp_port}; "
-                "start the TeamTalk server first."
+        if flood_only:
+            print(
+                "[probe] skipped (--no-probe); running the TCP/UDP flood with "
+                "no SDK login and no service measurements."
             )
-        baseline_relays = [p.relay_ms for p in baseline if p.relay_ms is not None]
-        baseline_median = _median(baseline_relays) if baseline_relays else None
-        print(
-            "Baseline: " + _phase_summary(baseline) + "."
-            if baseline else "Baseline: no samples."
-        )
-        if baseline_median is not None:
-            print(f"Baseline message RTT median: {baseline_median:.1f} ms")
+        else:
+            probe = ServiceProbe(args)
+            probe.start()
+            for index in range(BASELINE_PROBES):
+                if stop_event.is_set():
+                    break
+                result = probe.probe("before")
+                baseline.append(result)
+                print(result.line(index + 1))
+                time.sleep(0.2)
+            if not probe.logged_in:
+                # No login is not a hard error: the raw TCP/UDP flood needs no
+                # account, so fall back to it rather than ending the run.
+                print(
+                    "[probe] SDK login unavailable; falling back to the "
+                    "TCP/UDP flood only (no service measurements)."
+                )
+                probe.close()
+                probe = None
+                flood_only = True
+            elif baseline and all(p.connect_ms is None for p in baseline):
+                print(
+                    f"[probe] nothing answered on {host}:{args.tcp_port}; "
+                    "falling back to the TCP/UDP flood only."
+                )
+                probe.close()
+                probe = None
+                flood_only = True
+            else:
+                baseline_relays = [
+                    p.relay_ms for p in baseline if p.relay_ms is not None
+                ]
+                baseline_median = (
+                    _median(baseline_relays) if baseline_relays else None
+                )
+                print(
+                    "Baseline: " + _phase_summary(baseline) + "."
+                    if baseline else "Baseline: no samples."
+                )
+                if baseline_median is not None:
+                    print(f"Baseline message RTT median: {baseline_median:.1f} ms")
         if args.simultaneous:
             print(
                 f"\nFlooding {host} ({args.mode}) with all {len(stages)} stage(s) "
@@ -814,10 +874,13 @@ def run(args: argparse.Namespace) -> int:
         if cap_timer is not None:
             cap_timer.start()
 
+        # A flood-only run never computes a baseline median; only the
+        # measured path reads it, so guarding here keeps the name defined.
+        median = None if flood_only else baseline_median
         if args.simultaneous:
             results = _run_simultaneous(args, stages, probe, stop_event, stage_events)
             for result in results:
-                classify_stage(result, baseline_median)
+                _finalize(result, flood_only, median)
                 print(result.line())
                 print(f"    flood: {_flood_totals(result.flood_stats)}")
         else:
@@ -825,12 +888,12 @@ def run(args: argparse.Namespace) -> int:
                 if stop_event.is_set():
                     break
                 result = _run_stage(args, stage, probe, stop_event)
-                classify_stage(result, baseline_median)
+                _finalize(result, flood_only, median)
                 print(result.line())
                 print(f"    flood: {_flood_totals(result.flood_stats)}")
                 results.append(result)
                 # The breaking point is the finding; stop once the server breaks.
-                if result.verdict == "broken":
+                if not flood_only and result.verdict == "broken":
                     print("Server broke — stopping the ramp at the breaking point.")
                     break
 
@@ -852,7 +915,15 @@ def run(args: argparse.Namespace) -> int:
     for result in results:
         print(result.line())
         print(f"    flood: {_flood_totals(result.flood_stats)}")
-    print("\n" + _summary(results))
+    if flood_only:
+        print(
+            "\nFlood-only ramp: no SDK probe measurements were taken, so no "
+            "stage verdicts are available. Compare the per-stage flood stats "
+            "above; supply a reachable probe account (without --no-probe) to "
+            "classify stages."
+        )
+    else:
+        print("\n" + _summary(results))
     return 0
 
 
@@ -864,7 +935,9 @@ def interactive_run() -> int:
     ``teamtalk.env`` defaults), the whitelist gate runs before anything else,
     and one question that defaults to No starts the ramp.  The account answers
     become the probe login, exactly as ``--probe-username`` /
-    ``--probe-password`` do on the flag path.
+    ``--probe-password`` do on the flag path.  The probe is optional: blank
+    credentials log in anonymously, and a login that fails falls back to a
+    flood-only run instead of ending it.
 
     One question is ramp-specific: how long the whole test should run for.
     Zero (the default) keeps the default per-stage plan; any other value is
@@ -899,6 +972,7 @@ def interactive_run() -> int:
         dry_run=False,
         confirm=True,
         total_time=None,
+        no_probe=False,
     )
     # The interactive plan is fixed (1 -> DEFAULT_MAX_THREADS threads, factor
     # 2), so the frame is bounded by stage count x the per-stage ceiling;

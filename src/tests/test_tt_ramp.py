@@ -39,6 +39,7 @@ def namespace(**overrides):
         probe_username="loadtest",
         probe_password="loadtest",
         probe_channel="/LoadTest",
+        no_probe=False,
         whitelist="whitelist.txt",
         dry_run=False,
         confirm=True,
@@ -131,6 +132,112 @@ class TestValidateArgs:
     def test_bad_mode(self):
         with pytest.raises(TeamTalkConfigurationError, match="--mode"):
             tt_ramp.validate_args(namespace(mode="http"))
+
+
+class TestNoProbeFallback:
+    """The probe is optional: no login falls back to the raw TCP/UDP flood."""
+
+    class _FakeProbe:
+        def __init__(self, args, *, logged_in=True, connect=True):
+            self.logged_in = logged_in
+            self._connect = connect
+            self.closed = False
+
+        def start(self):
+            pass
+
+        def probe(self, phase):
+            connect_ms = 1.0 if self._connect else None
+            return ProbeResult(phase, connect_ms, None, False)
+
+        def close(self):
+            self.closed = True
+
+    def _run(self, monkeypatch, probe, **overrides):
+        def fake_flood(args, stop_event):
+            # Linger briefly so the during-stage probe loop has a window.
+            stop_event.wait(0.25)
+            return {"tcp": FloodStats()}
+
+        monkeypatch.setattr(tt_ramp, "_run_flood", fake_flood)
+        monkeypatch.setattr(tt_ramp, "ServiceProbe", lambda args: probe)
+        return tt_ramp.run(namespace(
+            start_threads=1, max_threads=1, stage_duration=1.0, **overrides
+        ))
+
+    def test_parser_exposes_no_probe_off_by_default(self):
+        parser = tt_ramp.build_parser()
+        assert parser.parse_args([]).no_probe is False
+        assert parser.parse_args(["--no-probe"]).no_probe is True
+
+    def test_no_probe_still_requires_confirm(self):
+        # The authorization gates are untouched by the probe-free path.
+        with pytest.raises(TeamTalkConfigurationError, match="--confirm"):
+            tt_ramp.validate_args(namespace(confirm=False, no_probe=True))
+
+    def test_no_probe_still_requires_whitelist(self):
+        with pytest.raises(TeamTalkConfigurationError, match="not in the whitelist"):
+            tt_ramp.validate_args(namespace(host="203.0.113.10", no_probe=True))
+
+    def test_no_probe_skips_the_probe_and_reports_flood_only(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            tt_ramp, "_run_flood",
+            lambda args, stop_event: {"tcp": FloodStats()},
+        )
+        monkeypatch.setattr(
+            tt_ramp, "ServiceProbe",
+            lambda args: pytest.fail("--no-probe must not build a probe"),
+        )
+        rc = tt_ramp.run(namespace(
+            no_probe=True, start_threads=1, max_threads=1, stage_duration=1.0,
+        ))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "skipped (--no-probe)" in out
+        assert "verdict=unmeasured" in out
+        assert "Flood-only ramp" in out
+
+    def test_login_failure_falls_back_to_flood_only(self, monkeypatch, capsys):
+        probe = self._FakeProbe(None, logged_in=False, connect=True)
+        rc = self._run(monkeypatch, probe)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "SDK login unavailable" in out
+        assert "falling back to the TCP/UDP flood only" in out
+        assert "verdict=unmeasured" in out
+        assert probe.closed
+
+    def test_unreachable_target_falls_back_instead_of_aborting(
+        self, monkeypatch, capsys
+    ):
+        # No probe answer is no longer fatal: the raw flood still runs.
+        probe = self._FakeProbe(None, logged_in=True, connect=False)
+        rc = self._run(monkeypatch, probe)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "nothing answered" in out
+        assert "Flood-only ramp" in out
+
+    def test_measured_run_still_classifies_stages(self, monkeypatch, capsys):
+        # A working login keeps the normal healthy/degraded/broken verdicts.
+        class GoodProbe(self._FakeProbe):
+            def probe(self, phase):
+                return ProbeResult(phase, 1.0, 0.5, True)
+
+        probe = GoodProbe(None, logged_in=True, connect=True)
+        rc = self._run(monkeypatch, probe)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "verdict=healthy" in out
+        assert "HELD at every tested load" in out
+
+    def test_dry_run_shows_probe_skipped(self, capsys):
+        rc = tt_ramp.run(namespace(dry_run=True, confirm=True, no_probe=True))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "probe       : skipped (--no-probe; flood only)" in out
 
 
 class TestBuildStages:
@@ -518,7 +625,7 @@ class TestMaxTotalTimeCap:
 
         class FakeProbe:
             def __init__(self, args):
-                pass
+                self.logged_in = True
 
             def start(self):
                 pass

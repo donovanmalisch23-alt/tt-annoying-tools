@@ -378,6 +378,15 @@ total (0 keeps the default per-stage plan; any other number is the frame
 the stages are sized to fill), and asks one go/no-go question that
 defaults to No before the ramp starts.
 
+The SDK service probe is optional and never gates the flood. Pass
+`--no-probe` to run the raw TCP/UDP flood with no login at all — useful when
+the server has no account for the probe, or only its UDP side is reachable —
+and if the probe cannot log in the ramp falls back to that flood-only mode by
+itself instead of ending the run or calling every stage broken. Flood-only
+stages are reported as **unmeasured** with their flood statistics, and the
+`--dry-run` plan shows the probe as skipped. The `--confirm` and
+`whitelist.txt` gates are unchanged in every mode.
+
 The schedule is tunable four ways (each also has an environment variable,
 so a ramp can be configured without flags):
 
@@ -404,6 +413,9 @@ python3 tt_ramp.py
 
 # Preview the stage plan without flooding:
 python3 tt_ramp.py --confirm --dry-run
+
+# Flood only, no SDK login at all (stages report flood stats, not verdicts):
+python3 tt_ramp.py --host 127.0.0.1 --confirm --no-probe
 
 # Ramp 1 → 64 threads, 10 s per stage (needs the local server running):
 python3 tt_ramp.py --host 127.0.0.1 --confirm
