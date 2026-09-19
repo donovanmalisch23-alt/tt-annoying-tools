@@ -22,9 +22,12 @@ runs the raw TCP/UDP flood with no login at all, and if the probe cannot log in
 flood-only mode: stages are reported as ``unmeasured`` with their flood stats
 instead of being mislabelled broken.  Only the measurements are lost, never the
 run.
-The per-stage flood length is bounded by ``tt_loic``'s existing ceiling (60 s),
-and the ramp's thread count by its own ``RAMP_MAX_THREADS`` (default 64,
-maximum 1024).  Each stage can also carry its own flood length with
+An explicit per-stage flood length (``--stage-duration`` /
+``--stage-durations``) is bounded by ``tt_loic``'s existing ceiling (60 s), but
+a ``--total-time`` frame has no upper bound -- a stage simply runs as long as
+the frame gives it, so a soak can last any length (only a 1 s floor per stage
+is enforced).  The ramp's thread count is bounded by its own
+``RAMP_MAX_THREADS`` (default 64, maximum 1024).  Each stage can also carry its own flood length with
 ``--stage-durations`` (the last entry repeats for any further stages),
 ``--simultaneous`` floods every stage at the same time instead of one after
 another, and ``--max-total-time`` caps the whole run's wall clock: when the
@@ -245,9 +248,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="fixed time frame for the whole ramp: sequential stages split it "
         "evenly (frame / stage count) so the run fills it exactly, and with "
-        "--simultaneous every stage runs the full frame; each stage still "
-        "obeys the per-stage bound, and --stage-duration/--stage-durations "
-        "are ignored while it is set (env: TT_RAMP_TOTAL_TIME)",
+        "--simultaneous every stage runs the full frame; the frame has no "
+        "upper bound (each stage only needs at least 1s), and --stage-duration"
+        "/--stage-durations are ignored while it is set "
+        "(env: TT_RAMP_TOTAL_TIME)",
     )
     parser.add_argument(
         "--start-threads", type=comma_int, default=DEFAULT_START_THREADS,
@@ -414,19 +418,16 @@ def build_stages(args: argparse.Namespace) -> list[RampStage]:
             args.total_time if args.simultaneous
             else args.total_time / len(stages)
         )
+        # The frame is unbounded: a stage may run as long as the frame gives
+        # it.  Only the 1 s floor is enforced, so --total-time can describe a
+        # soak of any length.
+        if per_stage < 1:
+            raise TeamTalkConfigurationError(
+                f"--total-time {args.total_time:g}s gives each of "
+                f"{len(stages)} stage(s) {per_stage:g}s; each stage needs at "
+                "least 1s"
+            )
         for stage in stages:
-            if not 1 <= per_stage <= MAX_DURATION_SECONDS:
-                hint = (
-                    "a simultaneous frame cannot exceed the per-stage bound"
-                    if args.simultaneous else
-                    "give the ramp fewer stages (raise --ramp-factor or "
-                    "--start-threads) or a larger frame"
-                )
-                raise TeamTalkConfigurationError(
-                    f"--total-time {args.total_time:g}s gives each of "
-                    f"{len(stages)} stage(s) {per_stage:g}s, outside the "
-                    f"1-{int(MAX_DURATION_SECONDS)}s per-stage bound ({hint})"
-                )
             stage.duration = per_stage
     return stages
 
@@ -683,6 +684,9 @@ def _summary(stages: list[StageResult]) -> str:
             first_broken = result.stage
             break  # the ramp stops at the first broken stage
 
+    # The thread ceiling is hard; the stage length is whatever this run was
+    # planned with (an unbounded --total-time frame can exceed 60 s a stage).
+    longest_stage = max(result.stage.duration for result in stages)
     if first_broken is not None:
         head = (
             f"BREAKS at {first_broken.threads} thread(s) "
@@ -691,14 +695,14 @@ def _summary(stages: list[StageResult]) -> str:
     elif first_degraded is not None:
         head = (
             "No breaking point reached within this tool's ceiling "
-            f"(max {RAMP_MAX_THREADS} threads, {int(MAX_DURATION_SECONDS)}s/stage)."
+            f"(max {RAMP_MAX_THREADS} threads, {longest_stage:g}s/stage)."
         )
     else:
         max_tested = stages[-1].stage.threads
         head = (
             f"HELD at every tested load up to {max_tested} thread(s); "
             "no breaking point reached within this tool's ceiling "
-            f"(max {RAMP_MAX_THREADS} threads, {int(MAX_DURATION_SECONDS)}s/stage)."
+            f"(max {RAMP_MAX_THREADS} threads, {longest_stage:g}s/stage)."
         )
 
     degraded_line = ""
@@ -974,16 +978,13 @@ def interactive_run() -> int:
         total_time=None,
         no_probe=False,
     )
-    # The interactive plan is fixed (1 -> DEFAULT_MAX_THREADS threads, factor
-    # 2), so the frame is bounded by stage count x the per-stage ceiling;
-    # anything larger would fall outside the 1-60 s per-stage bound.
-    stage_count = len(build_stages(args))
+    # The frame has no upper bound: any positive answer is accepted, and the
+    # stages are sized to fill it (each stage keeps at least a 1 s floor).
     frame = prompt_float(
         "How long would you like the test to run for, in total seconds "
         "(0 = the default stage plan)",
         0.0,
         minimum=0.0,
-        maximum=MAX_DURATION_SECONDS * stage_count,
     )
     if frame:
         args.total_time = frame

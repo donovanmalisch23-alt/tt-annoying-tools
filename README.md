@@ -407,8 +407,9 @@ so a ramp can be configured without flags):
   stages split it evenly (70 s over the default 7 stages is 10 s each), so
   the run fills the frame exactly, and with `--simultaneous` every stage
   runs the full frame. It replaces `--stage-duration`/`--stage-durations`
-  and is refused if a stage would fall outside the 1–60 s per-stage bound
-  (fix it by changing the frame or the stage count).
+  and has no upper bound — a stage only needs at least 1 s — so a long soak
+  such as `--total-time 3600` is allowed. (An explicit
+  `--stage-duration`/`--stage-durations` is still capped at 60 s.)
 - `--max-total-time 90` — a hard wall-clock cap for the whole ramp. When
   it expires, every flood stops and the ramp reports the results collected
   so far.

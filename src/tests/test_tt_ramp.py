@@ -303,20 +303,24 @@ class TestBuildStages:
         with pytest.raises(TeamTalkConfigurationError, match="--total-time"):
             tt_ramp.build_stages(namespace(total_time=3.0))
 
-    def test_total_time_above_per_stage_bound_refused_sequential(self):
-        # 700 s across 7 stages is 100 s each: over the 60 s per-stage cap.
-        with pytest.raises(
-            TeamTalkConfigurationError, match="per-stage bound"
-        ):
-            tt_ramp.build_stages(namespace(total_time=700.0))
+    def test_total_time_has_no_upper_bound_sequential(self):
+        # 700 s across 7 stages is 100 s each: longer than tt_loic's 60 s
+        # per-stage ceiling, and legal because the frame is unbounded.
+        stages = tt_ramp.build_stages(namespace(total_time=700.0))
+        assert len(stages) == 7
+        assert all(s.duration == 100.0 for s in stages)
 
-    def test_total_time_above_per_stage_bound_refused_simultaneous(self):
-        # Simultaneous stages each run the full frame, so the frame itself
-        # cannot exceed the 60 s per-stage bound.
-        with pytest.raises(
-            TeamTalkConfigurationError, match="simultaneous frame cannot exceed"
-        ):
-            tt_ramp.build_stages(namespace(total_time=61.0, simultaneous=True))
+    def test_total_time_has_no_upper_bound_simultaneous(self):
+        # Simultaneous stages each run the full frame; a 61 s frame is legal.
+        stages = tt_ramp.build_stages(
+            namespace(total_time=61.0, simultaneous=True)
+        )
+        assert all(s.duration == 61.0 for s in stages)
+
+    def test_long_soak_frame_is_allowed(self):
+        # A one-hour soak frame splits across the default 7 stages.
+        stages = tt_ramp.build_stages(namespace(total_time=3600.0))
+        assert all(s.duration == 3600.0 / 7 for s in stages)
 
     def test_total_time_fits_when_fewer_stages(self):
         # Fewer stages (bigger start) mean a long frame still fits the bound.
@@ -723,9 +727,9 @@ class TestInteractiveRun:
         # The "how long should the test run" answer is the run's frame.
         assert captured["args"].total_time == 70.0
 
-    def test_frame_prompt_is_bounded_by_the_stage_plan(self, monkeypatch):
-        # The interactive plan is the fixed 7-stage ramp, so the frame can
-        # never ask for more than 7 x 60 s.
+    def test_frame_prompt_has_no_upper_bound(self, monkeypatch):
+        # The frame is unlimited, so the prompt imposes no maximum (0 still
+        # means "keep the default stage plan").
         seen = {}
 
         def fake_prompt(label, default, **kwargs):
@@ -740,7 +744,8 @@ class TestInteractiveRun:
             tt_ramp, "prompt_yes_no", lambda label, default: False
         )
         assert tt_ramp.interactive_run() == 0
-        assert seen["maximum"] == tt_ramp.MAX_DURATION_SECONDS * 7
+        assert "maximum" not in seen
+        assert seen["minimum"] == 0.0
         assert "How long would you like the test to run for" in seen["label"]
 
     def test_declined_go_no_go_cancels_without_running(self, monkeypatch, capsys):
