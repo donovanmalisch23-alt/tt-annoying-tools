@@ -1,8 +1,8 @@
-"""Tests for tt_loic (LOIC-style local-only flood tester).
+"""Tests for tt_loic (LOIC-style flood tester, local or whitelisted).
 
-Covers the safety gate (the tool must refuse anything that is not this
-machine), argument validation, and the report verdict.  The flood itself is
-exercised against the live local server, not in unit tests.
+Covers the target gate (this machine, or a host explicitly listed in
+whitelist.txt), argument validation, and the report verdict.  The flood itself
+is exercised against the live local server, not in unit tests.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ def namespace(**overrides):
         probe_password="loadtest",
         probe_channel="/LoadTest",
         no_probe=False,
+        whitelist="whitelist.txt",
         confirm=True,
     )
     args.update(overrides)
@@ -71,7 +72,7 @@ class TestValidateArgs:
             tt_loic.validate_args(namespace(mode="http"))
 
 
-class TestLocalGate:
+class TestTargetGate:
     def test_loopback_allowed(self):
         tt_loic.validate_args(namespace(host="127.0.0.1"))  # loopback, no lookup
 
@@ -80,12 +81,23 @@ class TestLocalGate:
         monkeypatch.setattr(tt_loic, "_local_addresses", lambda: {"192.168.0.191"})
         tt_loic.validate_args(namespace(host="192.168.0.191"))
 
-    def test_remote_address_refused(self):
-        # TEST-NET-3: a numeric address that is never this machine
-        with pytest.raises(
-            TeamTalkConfigurationError, match="only floods servers running locally"
-        ):
+    def test_local_host_needs_no_whitelist_file(self):
+        # The local fast path never reads the whitelist, so a missing file
+        # cannot break a run against this machine.
+        tt_loic.validate_args(
+            namespace(host="127.0.0.1", whitelist="/nonexistent/whitelist.txt")
+        )
+
+    def test_remote_address_refused_when_not_whitelisted(self):
+        # TEST-NET-3: a numeric address that is never this machine and is not
+        # in whitelist.txt.
+        with pytest.raises(TeamTalkConfigurationError, match="not in the whitelist"):
             tt_loic.validate_args(namespace(host="203.0.113.10"))
+
+    def test_whitelisted_remote_address_allowed(self):
+        # An explicitly listed remote host is a legal target, exactly as it is
+        # for tt_ramp.py and tt_suite.py.
+        tt_loic.validate_args(namespace(host="paralleledition.xyz"))
 
     def test_empty_host_refused(self):
         with pytest.raises(TeamTalkConfigurationError, match="--host"):
@@ -253,7 +265,7 @@ class TestProbeRootFallback:
 
 
 class TestInteractiveRun:
-    """No-arguments path: shared prompts, local gate before the go/no-go."""
+    """No-arguments path: shared prompts, target gate before the go/no-go."""
 
     def _config(self, **overrides):
         values = dict(
@@ -292,6 +304,7 @@ class TestInteractiveRun:
         # The go/no-go answer stands in for --confirm; nothing else changes.
         assert args.confirm is True
         assert args.no_probe is False
+        assert args.whitelist.endswith("whitelist.txt")
         assert args.threads == tt_loic.DEFAULT_THREADS
         assert args.duration == tt_loic.DEFAULT_DURATION
 
@@ -317,10 +330,28 @@ class TestInteractiveRun:
             tt_loic, "prompt_yes_no",
             lambda label, default: pytest.fail("refused host must not reach confirm"),
         )
-        with pytest.raises(
-            TeamTalkConfigurationError, match="only floods servers running locally"
-        ):
+        with pytest.raises(TeamTalkConfigurationError, match="not in the whitelist"):
             tt_loic.interactive_run()
+
+    def test_whitelisted_remote_host_reaches_go_no_go(self, monkeypatch):
+        # A whitelisted host that is not this machine is a legal target, so it
+        # must pass the gate and reach the confirm question.
+        monkeypatch.setattr(
+            tt_loic, "prompt_connection_config",
+            lambda **_: self._config(host="paralleledition.xyz"),
+        )
+        seen = {}
+
+        def fake_yes_no(label, default):
+            seen["label"] = label
+            return False  # decline; reaching the prompt is what is under test
+
+        monkeypatch.setattr(tt_loic, "prompt_yes_no", fake_yes_no)
+        monkeypatch.setattr(
+            tt_loic, "run", lambda args: pytest.fail("declined run must not start")
+        )
+        assert tt_loic.interactive_run() == 0
+        assert "paralleledition.xyz" in seen["label"]
 
 
 class TestMainDispatch:

@@ -121,7 +121,7 @@ All of these are ordinary Python 3 programs and call TeamTalk directly:
 | `tt_leave_join_spammer.py` | Run a configurable channel leave/join test. |
 | `ttbot_the_offender.py` | Run the safe trigger-based response bot described above. |
 | `tt_suite.py` | Discover channels/users and run consent-aware combined tests, including an optional concurrent multi-bot mode. |
-| `tt_loic.py` | LOIC-style TCP/UDP flood modes against a TeamTalk server on this machine, with before/during/after service probes. |
+| `tt_loic.py` | LOIC-style TCP/UDP flood modes against a TeamTalk server on this machine or a whitelisted host, with before/during/after service probes. |
 | `tt_ramp.py` | Ramped breaking-point capacity test: steps the `tt_loic` flood in geometric stages and classifies each as healthy / degraded / broken, stopping at the first break. Per-stage durations (`--stage-durations`), all-stages-at-once (`--simultaneous`), a fixed whole-ramp time frame (`--total-time`), and a wall-clock cap (`--max-total-time`) are supported. |
 
 Running a tool with no arguments opens prompts, just like the original tools:
@@ -312,7 +312,7 @@ remembers about a person on their **username** instead:
 - Discovery prints users by name (`Amy — /Lobby`, or `Bobby (@bobby)` when the
   nickname differs from the username), never as bare IDs.
 
-### LOIC-style flood test (this machine only)
+### LOIC-style flood test (this machine or whitelisted hosts)
 
 `tt_loic.py` reproduces LOIC's two flood modes — a TCP junk-data flood and a
 UDP junk-datagram flood — as a plain CLI (LOIC itself is a Windows GUI app,
@@ -320,15 +320,17 @@ unusable with a screen reader), then measures what the flood actually does to
 a TeamTalk server: connection latency, login, and message round-trips before,
 during, and after the flood, with a plain-language verdict.
 
-It is **local-only by construction**: the target must resolve to an address on
-this machine (loopback or one of its own interfaces) — anything else is
-refused — the flood length is capped at 60 seconds, and `--confirm` is
-required on the flag path. Point it only at a server you run on this machine,
-such as the localhost server shipped with the `tt5-loadtest` project. Running
-it with no arguments opens the same prompts as every other tool — server
-host, TCP port, UDP port, account; Enter accepts the `teamtalk.env`
-defaults — then applies the local-only check and asks one go/no-go question
-that defaults to No before the flood starts.
+Its target is **gated, not unrestricted**: the target must resolve to an
+address on this machine (loopback or one of its own interfaces) or be listed
+explicitly in `whitelist.txt` — a remote host that is not listed is refused.
+This is the same operator-edited authorization gate `tt_ramp.py` and
+`tt_suite.py` use, so the local check is the fast path and the whitelist is
+the only way to authorize a remote target. The flood length is capped at 60
+seconds, and `--confirm` is required on the flag path. Running it with no
+arguments opens the same prompts as every other tool — server host, TCP port,
+UDP port, account; Enter accepts the `teamtalk.env` defaults — then applies
+the target check and asks one go/no-go question that defaults to No before
+the flood starts.
 
 ```bash
 # Same prompts as every other tool, then a go/no-go that defaults to No:
@@ -340,6 +342,10 @@ python3 tt_loic.py --confirm
 
 # UDP only, 16 threads, 30 s, no SDK probes:
 python3 tt_loic.py --mode udp --threads 16 --duration 30 --no-probe --confirm
+
+# A remote target that is listed in whitelist.txt (default path; override
+# with --whitelist or TT_WHITELIST):
+python3 tt_loic.py --host paralleledition.xyz --confirm
 ```
 
 The probe logs in with `--probe-username`/`--probe-password` (default blank:

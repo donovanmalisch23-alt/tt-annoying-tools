@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LOIC-style TCP/UDP flood modes, restricted to servers on this machine.
+"""LOIC-style TCP/UDP flood modes, gated to this machine or whitelisted hosts.
 
 LOIC (Low Orbit Ion Cannon) is a Windows GUI app, which is unusable with a
 screen reader; this reproduces its two relevant flood modes -- a TCP
@@ -8,14 +8,16 @@ measures what the flood actually does to a TeamTalk server running locally:
 how connection latency, login, and message round-trips behave before,
 during, and after the flood, and whether the server stays in service.
 
-Local-only by construction: the target must resolve to an address on this
-machine (loopback or one of its own interfaces), the run length is capped,
-and ``--confirm`` is required on the flag path.  Point this only at a server
-you run on this machine.
+The target is gated, not unrestricted: it must resolve to an address on this
+machine (loopback or one of its own interfaces), or be listed explicitly in
+``whitelist.txt`` -- the same operator-edited authorization gate that
+``tt_ramp.py`` and ``tt_suite.py`` use.  The run length is capped and
+``--confirm`` is required on the flag path.  Point this only at a server you
+run yourself.
 
 Running with no arguments opens the same interactive prompts as the rest of
 the suite — server host, TCP port, UDP port, and account, all defaulting from
-``teamtalk.env`` — then applies the local-only gate and asks one go/no-go
+``teamtalk.env`` — then applies the target gate and asks one go/no-go
 question that defaults to No before the flood starts.  The account may be
 left blank: a blank username and password log the probe in anonymously,
 which servers without user accounts accept.
@@ -33,6 +35,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Sequence
 
 from tt_teamtalk import (
@@ -47,6 +50,14 @@ from tt_teamtalk import (
     prompt_yes_no,
     sdk_event,
     sdk_int,
+)
+
+# The whitelist gate lives in the suite module; reuse it verbatim rather than
+# re-implementing the host normalization, so the tools can never disagree
+# about what "allowed" means.
+from tt_suite import (
+    DEFAULT_WHITELIST,
+    ensure_server_allowed,
 )
 
 
@@ -113,6 +124,28 @@ def _assert_local_host(host: str) -> None:
     )
 
 
+def _whitelist_path(args: argparse.Namespace) -> Path:
+    return Path(getattr(args, "whitelist", str(DEFAULT_WHITELIST)))
+
+
+def _assert_target_allowed(host: str, whitelist_path: Path) -> None:
+    """Refuse a target unless it is this machine or explicitly whitelisted.
+
+    The local check stays the fast path: a target on this machine needs no
+    file.  A target that is not this machine must appear in the
+    operator-edited whitelist, the same authorization gate ``tt_ramp.py`` and
+    ``tt_suite.py`` use, so a remote server is legal only when the operator
+    has listed it.
+    """
+
+    try:
+        _assert_local_host(host)
+        return
+    except TeamTalkConfigurationError:
+        pass
+    ensure_server_allowed(host, whitelist_path)
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -120,11 +153,13 @@ def _assert_local_host(host: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="LOIC-style TCP/UDP flood test against a TeamTalk server "
-        "running on this machine, with before/during/after service probes."
+        "on this machine or a whitelisted host, with before/during/after "
+        "service probes."
     )
     parser.add_argument(
         "--host", default=DEFAULT_HOST,
-        help=f"flood target host; must be this machine (default: {DEFAULT_HOST})",
+        help=f"flood target host; must be this machine or listed in "
+        f"whitelist.txt (default: {DEFAULT_HOST})",
     )
     parser.add_argument(
         "--tcp-port", type=comma_int, default=DEFAULT_PORT,
@@ -168,12 +203,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="channel the probe joins and messages (default: /LoadTest)",
     )
     parser.add_argument(
+        "--whitelist",
+        default=os.environ.get("TT_WHITELIST", str(DEFAULT_WHITELIST)),
+        help=f"server whitelist path for remote targets (default: "
+        f"{DEFAULT_WHITELIST})",
+    )
+    parser.add_argument(
         "--no-probe", action="store_true",
         help="skip the SDK service probes; flood only",
     )
     parser.add_argument(
         "--confirm", action="store_true",
-        help="required: confirms this deliberate flood against the local target",
+        help="required: confirms this deliberate flood against the target",
     )
     return parser
 
@@ -199,7 +240,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise TeamTalkConfigurationError(
             "--confirm is required: this tool deliberately floods the target"
         )
-    _assert_local_host(args.host.strip())
+    _assert_target_allowed(args.host.strip(), _whitelist_path(args))
 
 
 # --------------------------------------------------------------------------- #
@@ -770,16 +811,17 @@ def interactive_run() -> int:
 
     Same interface as the other tools: ``prompt_connection_config`` asks for
     the server host, TCP port, UDP port, and account (Enter accepts the
-    ``teamtalk.env`` defaults), the local-only gate runs before anything
+    ``teamtalk.env`` defaults), the target gate runs before anything
     else, and one question that defaults to No starts the flood.  The
     account answers become the probe login, exactly as ``--probe-username``
     / ``--probe-password`` do on the flag path.
     """
     config = prompt_connection_config(channel_required=False)
-    # Gate first: a target that is not this machine is refused before the
-    # go/no-go question so the operator is never asked to confirm a run that
-    # cannot proceed.  run() re-checks it either way.
-    _assert_local_host(config.host)
+    whitelist = Path(os.environ.get("TT_WHITELIST", str(DEFAULT_WHITELIST)))
+    # Gate first: a target that is neither this machine nor whitelisted is
+    # refused before the go/no-go question so the operator is never asked to
+    # confirm a run that cannot proceed.  run() re-checks it either way.
+    _assert_target_allowed(config.host, whitelist)
     if not prompt_yes_no(
         f"Flood {config.host} (TCP + UDP, {DEFAULT_THREADS} thread(s) per "
         f"mode, {DEFAULT_DURATION:g}s)?",
@@ -788,7 +830,7 @@ def interactive_run() -> int:
         print("Flood cancelled.")
         return 0
     # The prompt above is this run's confirmation; validate_args inside run()
-    # re-checks the local-only assert, the confirm requirement, and every bound.
+    # re-checks the target gate, the confirm requirement, and every bound.
     args = argparse.Namespace(
         host=config.host,
         tcp_port=config.tcp_port,
@@ -800,6 +842,7 @@ def interactive_run() -> int:
         probe_username=config.username,
         probe_password=config.password,
         probe_channel=os.environ.get("TT_CHANNEL_PATH", "").strip() or "/LoadTest",
+        whitelist=str(whitelist),
         no_probe=False,
         confirm=True,
     )
