@@ -60,3 +60,6 @@ android/app/src/main/assets/teamtalk-sdk-license.txt
 android/local.properties
 android/gradle/wrapper/gradle-wrapper.jar
 android/*.keystore
+
+# Local .commandcode/ tool state (created by an external tool, not source).
+.commandcode/
