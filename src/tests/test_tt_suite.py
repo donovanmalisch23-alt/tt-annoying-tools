@@ -1155,6 +1155,122 @@ class TestContinuousScan:
         assert "spawned message-bot" not in out
 
 
+class TestMidRunDiscovery:
+    """Users who log in while a concurrent run is already active must be found.
+
+    Both continuous discovery paths re-read the roster on every pass: the
+    shared --all-users user-bot sweeps every --sweep-interval, and the
+    --continuous-scan scanner re-lists every --scan-interval.  A joiner that
+    appears between two passes is therefore picked up by the next one — a
+    path that only snapshots the roster at startup (or never starts the bot
+    at all) leaves the joiner unhandled for the whole run.  These tests
+    inject a login between passes and require the joiner to be acted on
+    before the run ends.
+    """
+
+    def _config(self):
+        return tt_teamtalk.ConnectionConfig(
+            host="h", nickname="suite", username="op", accept_sdk_license=True
+        )
+
+    def _user(self, uid, username, nickname):
+        return {
+            "id": uid, "username": username, "nickname": nickname,
+            "display_name": nickname or username, "channel_id": 1,
+            "channel_path": "/",
+        }
+
+    def _joiners_then_stop(self, monkeypatch, join_on_pass, joiners, stop_after):
+        """Patch ``_drain_events`` so ``joiners`` appear mid-run and the bot
+        stops later: joiners are added to the roster during pass
+        ``join_on_pass`` (after the previous pass's roster snapshot), and the
+        shared stop event fires after pass ``stop_after``."""
+        real_drain = tt_suite._drain_events
+        calls = {"n": 0}
+
+        def drain(session, stop_event, window_s):
+            result = real_drain(session, stop_event, window_s)
+            calls["n"] += 1
+            if calls["n"] == join_on_pass:
+                session.users.extend(joiners)
+            if calls["n"] >= stop_after:
+                stop_event.set()
+            return result
+
+        monkeypatch.setattr(tt_suite, "_drain_events", drain)
+
+    def test_all_users_user_bot_messages_mid_run_joiner(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        # --concurrent --all-users: the shared user-bot runs continuously.
+        # amy is online when the run starts; bob logs in after the first
+        # sweep's roster snapshot.  Both must be messaged exactly once each
+        # (no repeats) before the run is interrupted.
+        factory, created = tool_session_factory
+        users = [self._user(5, "amy", "Amy")]
+        monkeypatch.setattr(tt_suite, "TeamTalkSession", factory(users=users))
+        self._joiners_then_stop(
+            monkeypatch, join_on_pass=2,
+            joiners=[self._user(7, "bob", "Bob")], stop_after=3,
+        )
+        args = argparse.Namespace(
+            private_message="hi", message_count=1, interval=0.0,
+            sweep_interval=0.05, bot_per_user=False, bot_per_channel=False,
+            churn_bots=0, churn_cycles=1, channel_message=None,
+            join_leave_cycles=0, dry_run=False, continuous_scan=False,
+            confirm=True,
+        )
+
+        assert tt_suite._run_concurrent(
+            self._config(), args, [], [], True, False
+        ) == 0
+        # created[0] is the startup discovery session; the user-bot is the
+        # only bot this plan spawns, and it must have opened its own session.
+        assert len(created) == 2
+        bot = created[1]
+        assert bot.config.nickname == "suite-users"
+        # amy from the startup roster, then the mid-run joiner: one message
+        # each, delivered against the ID current at send time, never repeated.
+        assert bot.private_messages == [("hi", 5), ("hi", 7)]
+        out = capsys.readouterr().out
+        assert "watching for users" in out
+
+    def test_continuous_scan_spawns_bot_for_mid_run_joiner(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        # --continuous-scan: the scanner sees amy on its first pass; bob logs
+        # in between passes.  A message bot must be spawned for each new
+        # user, exactly once.
+        factory, created = tool_session_factory
+        channels = [
+            {"id": 4, "name": "lobby", "path": "/lobby", "password_required": False}
+        ]
+        users = [self._user(5, "amy", "Amy")]
+        monkeypatch.setattr(
+            tt_suite, "TeamTalkSession", factory(channels=channels, users=users)
+        )
+        self._joiners_then_stop(
+            monkeypatch, join_on_pass=2,
+            joiners=[self._user(7, "bob", "Bob")], stop_after=3,
+        )
+        args = argparse.Namespace(
+            bot_per_channel=False, bot_per_user=True, private_message="hi",
+            channel_message=None, join_leave_cycles=0, message_count=1,
+            interval=0.0, sweep_interval=0.05, scan_interval=0.05,
+            dry_run=False, confirm=True,
+        )
+
+        assert tt_suite._run_continuous_scan(self._config(), args) == 0
+        out = capsys.readouterr().out
+        assert out.count("spawned message-bot suite-Amy") == 1
+        assert out.count("spawned message-bot suite-Bob") == 1
+        # Both spawned bots delivered their one message to their own user.
+        amy_bot = next(s for s in created if s.config.nickname == "suite-Amy")
+        bob_bot = next(s for s in created if s.config.nickname == "suite-Bob")
+        assert amy_bot.private_messages == [("hi", 5)]
+        assert bob_bot.private_messages == [("hi", 7)]
+
+
 class TestChurnBot:
     def test_cycle_count(self, tool_session_factory, monkeypatch):
         factory, created = tool_session_factory

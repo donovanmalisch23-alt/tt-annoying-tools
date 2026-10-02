@@ -42,6 +42,7 @@ from tt_teamtalk import (
     prompt_text,
     prompt_yes_no,
 )
+from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 # When frozen by PyInstaller, __file__ is inside a temp extraction dir, so
@@ -322,6 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm requested channel/private test actions",
     )
+    add_profile_argument(parser)
     return parser
 
 
@@ -1767,6 +1769,14 @@ def _run_concurrent(
                     )
                 )
         else:
+            # The single shared user-bot job must carry the same fields as the
+            # per-user jobs above: ``_spawn_bot_thread`` unpacks one job shape
+            # for every "user" job, including the trailing nick_suffix.  With
+            # the legacy arity (no suffix) the unpack raised ValueError before
+            # any bot started, which silently killed the continuous
+            # --all-users discovery mode — the bot that watches for mid-run
+            # joiners never ran at all.  An empty suffix keeps the shared bot
+            # named "<nickname>-users", as before the per-target rename.
             jobs.append(
                 (
                     "user",
@@ -1776,6 +1786,7 @@ def _run_concurrent(
                     args.message_count,
                     args.interval,
                     args.sweep_interval,
+                    "",
                 )
             )
     if channel_action:
@@ -1795,6 +1806,13 @@ def _run_concurrent(
                     )
                 )
         else:
+            # Same arity requirement as the user job above: every "channel"
+            # job is unpacked with the trailing nick_suffix and idle_when_done
+            # fields, so the single shared channel-bot job must carry them
+            # too or ``_spawn_bot_thread`` raises ValueError before the bot
+            # can start.  An empty suffix keeps the shared bot named
+            # "<nickname>-channels", and idle_when_done=False preserves the
+            # plain join/leave behaviour (idling is a --continuous-scan mode).
             jobs.append(
                 (
                     "channel",
@@ -1804,6 +1822,8 @@ def _run_concurrent(
                     args.message_count,
                     args.join_leave_cycles,
                     args.interval,
+                    "",
+                    False,
                 )
             )
     for i in range(args.churn_bots):
@@ -2103,7 +2123,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not actual_argv:
             return interactive_run()
         parser = build_parser()
-        args = parser.parse_args(actual_argv)
+        args = parse_args_with_profile(parser, actual_argv)
         validate_args(args)
         return run(args)
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:

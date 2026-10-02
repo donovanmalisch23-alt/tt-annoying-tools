@@ -7,6 +7,9 @@ __pycache__/
 teamtalk.env
 whitelist.txt
 
+# Profiles (--profile): plain text and may hold credentials, like teamtalk.env.
+*.profile
+
 # Per-user first-run SDK license acceptance marker.
 .tt-sdk-license-accepted
 

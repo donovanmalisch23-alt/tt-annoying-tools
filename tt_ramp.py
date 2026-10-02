@@ -99,6 +99,7 @@ from tt_loic import (
     _phase_summary,
     _run_flood,
 )
+from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -307,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="required: confirms this deliberate ramped flood against the "
         "whitelisted target",
     )
+    add_profile_argument(parser)
     return parser
 
 
@@ -1004,7 +1006,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if not actual_argv:
             return interactive_run()
-        return run(build_parser().parse_args(actual_argv))
+        return run(parse_args_with_profile(build_parser(), actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)
     except (EOFError, KeyboardInterrupt):

@@ -21,6 +21,7 @@ from tt_teamtalk import (
     prompt_float,
     prompt_int,
 )
+from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 MIN_INTERVAL = 0.0
@@ -53,11 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WAIT,
         help=f"seconds to wait before the first cycle (maximum {MAX_WAIT:g})",
     )
-    parser.add_argument(
-        "--confirm",
-        action="store_true",
-        help="accepted for compatibility; interactive mode does not need confirmation",
-    )
+    add_profile_argument(parser)
     return parser
 
 
@@ -152,7 +149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not actual_argv:
             return interactive_run()
         parser = build_parser()
-        return run(parser.parse_args(actual_argv))
+        return run(parse_args_with_profile(parser, actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)
     except (EOFError, KeyboardInterrupt):

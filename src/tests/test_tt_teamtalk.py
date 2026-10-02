@@ -313,16 +313,6 @@ class TestPrompts:
         monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
         assert tt_teamtalk.prompt_float("Delay", 1.0) == 0.25
 
-    def test_prompt_choice_case_insensitive(self, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda prompt="": "BETA")
-        assert tt_teamtalk.prompt_choice("Mode", ["alpha", "beta"], "alpha") == "beta"
-
-    def test_prompt_choice_reprompts(self, monkeypatch, capsys):
-        answers = iter(["gamma", "alpha"])
-        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-        assert tt_teamtalk.prompt_choice("Mode", ["alpha", "beta"], "alpha") == "alpha"
-        assert "Please choose" in capsys.readouterr().out
-
     @pytest.mark.parametrize(
         ("answer", "default", "expected"),
         [("", True, True), ("", False, False), ("y", False, True),

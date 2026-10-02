@@ -30,6 +30,7 @@ from tt_teamtalk import (
     prompt_text,
     prompt_yes_no,
 )
+from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 MIN_COOLDOWN = 5.0
@@ -91,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm unlimited bot operation when --max-responses 0 is used",
     )
+    add_profile_argument(parser)
     return parser
 
 
@@ -375,7 +377,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not actual_argv:
             return interactive_run()
         parser = build_parser()
-        return run(parser.parse_args(actual_argv))
+        return run(parse_args_with_profile(parser, actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)
     except (EOFError, KeyboardInterrupt):

@@ -374,12 +374,6 @@ def _sdk_license_accepted_markers() -> list[Path]:
     return markers
 
 
-def _sdk_license_accepted_marker() -> Path:
-    """Primary marker file (kept for backwards compatibility with callers)."""
-
-    return _sdk_license_accepted_markers()[0]
-
-
 def _write_sdk_license_marker(markers: list[Path], text: str) -> None:
     """Persist license acceptance to the first writable marker location."""
 
@@ -600,18 +594,6 @@ def prompt_float(
             print(f"Please enter a number no greater than {maximum:g}.")
             continue
         return parsed
-
-
-def prompt_choice(label: str, choices: Iterable[str], default: str) -> str:
-    """Read a case-insensitive choice while showing the available values."""
-
-    normalized = {choice.lower(): choice for choice in choices}
-    choices_text = "/".join(normalized)
-    while True:
-        value = prompt_text(f"{label} ({choices_text})", default).lower()
-        if value in normalized:
-            return normalized[value]
-        print(f"Please choose one of: {choices_text}.")
 
 
 def prompt_yes_no(label: str, default: bool = True) -> bool:

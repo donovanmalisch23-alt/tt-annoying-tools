@@ -157,6 +157,45 @@ python3 tt_suite.py --all-channels --all-users --join-leave-cycles 1 \
   --message-count 1 --confirm
 ```
 
+### Profiles (`--profile`)
+
+Every tool takes `--profile NAME_OR_PATH`, which loads a small plain-text
+`key = value` file so switching servers is one flag instead of retyping the
+host, ports, and credentials each run. The value is a path to the file, or a
+bare name that is searched as `<name>.profile` (then plain `<name>`) in the
+current directory and then next to the tools:
+
+```bash
+python3 tt_spammer.py --profile home --cycles 5
+python3 tt_suite.py --profile home --dry-run
+```
+
+A profile can hold any subset of a tool's settings — or settings for several
+tools at once. Each tool applies the keys it recognizes and ignores keys that
+belong to other tools, so one file can drive the whole suite. Keys are flag
+names without the dashes (`tcp-port` and `tcp_port` are the same key, and case
+is ignored), `#` starts a comment, and a value wrapped in one pair of quotes
+keeps its spaces. An empty value means the empty string: `password =` forces an
+anonymous login even when `TT_PASSWORD` is set. Booleans accept
+true/false/yes/no/on/off/1/0; `false` picks the matching off-flag when one
+exists (`kick_resistance = false` becomes `--no-kick-resistance`).
+
+Precedence is explicit command-line flag, then profile, then the tool's
+built-in defaults (`teamtalk.env`). A key no tool anywhere recognizes is an
+error naming the valid keys, so a typo cannot quietly do nothing. Profiles
+are plain text and can hold credentials, so `*.profile` is gitignored — treat
+one like `teamtalk.env`.
+
+`./profile_creator.sh` writes a profile interactively: it walks every
+settable value across all the tools with its help text, and pressing Enter
+skips a setting. Skipped settings are written into the file as comments, so
+adding one later is just uncommenting a line:
+
+```bash
+./profile_creator.sh
+./profile_creator.sh my-lab   # pre-fills the profile name
+```
+
 The suite's `--concurrent` mode splits the per-user, per-channel, and login/out
 work across concurrent bots, each on its own SDK connection: one user-bot
 private-messages every discovered user, one channel-bot messages every
@@ -305,7 +344,7 @@ kick within the delay. Turn it off with `--no-kick-resistance` (or
 
 ```bash
 # churn bot that reconnects after every kick, 2 s between checks:
-python3 tt_spammer.py --cycles 1000 --interval 0.1 --reconnect-delay 2 --confirm
+python3 tt_spammer.py --cycles 1000 --interval 0.1 --reconnect-delay 2
 ```
 
 After releasing the SDK client, every tool waits `TT_SHUTDOWN_SETTLE_SECONDS`
