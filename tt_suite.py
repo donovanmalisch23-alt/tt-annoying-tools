@@ -49,6 +49,8 @@ from tt_teamtalk import (
 PROJECT_DIR = config_dir()
 DEFAULT_WHITELIST = PROJECT_DIR / "whitelist.txt"
 DEFAULT_INTERVAL = 0.2
+# How often --continuous-scan re-lists every channel/user on the server.
+DEFAULT_SCAN_INTERVAL = 2.0
 DEFAULT_MESSAGE_COUNT = 1
 DEFAULT_LOGIN_CYCLES = 0
 DEFAULT_JOIN_LEAVE_CYCLES = 0
@@ -278,6 +280,25 @@ def build_parser() -> argparse.ArgumentParser:
         "new-joiner mode",
     )
     parser.add_argument(
+        "--continuous-scan",
+        action="store_true",
+        help="with --concurrent, keep scanning the server for all available "
+        "channels/users and spawn a bot for each new one until interrupted: "
+        "a channel bot nicknamed '<nickname>-<channel name>' that joins the "
+        "channel it is named after (and idles there when no channel action is "
+        "configured), and a message bot nicknamed '<nickname>-<user name>' "
+        "that private-messages its user once. Targets already handled are "
+        "never re-spawned. Requires --bot-per-channel and/or --bot-per-user; "
+        "selection flags like --all-users/--all-channels are implied",
+    )
+    parser.add_argument(
+        "--scan-interval",
+        type=float,
+        default=DEFAULT_SCAN_INTERVAL,
+        help=f"seconds between --continuous-scan discovery passes "
+        f"(default: {DEFAULT_SCAN_INTERVAL:g})",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=DEFAULT_INTERVAL,
@@ -316,6 +337,16 @@ def validate_args(
     all_users = bool(args.all_users or args.all_targets or ids_request_all)
     all_channels = bool(args.all_channels or args.all_targets)
 
+    if args.continuous_scan:
+        # The scanner discovers everything itself, so target selection is
+        # simply "all": the --private-message / channel-action gates that
+        # require an explicit selection are satisfied, and the per-target
+        # bots it spawns are the whole point of the run.
+        args.all_users = True
+        args.all_channels = True
+        all_users = True
+        all_channels = True
+
     if args.message_count < 1:
         raise TeamTalkConfigurationError("--message-count must be at least 1")
     if args.login_cycles < 0:
@@ -326,6 +357,8 @@ def validate_args(
         raise TeamTalkConfigurationError("--interval cannot be negative")
     if args.sweep_interval < 0:
         raise TeamTalkConfigurationError("--sweep-interval cannot be negative")
+    if args.scan_interval < 0:
+        raise TeamTalkConfigurationError("--scan-interval cannot be negative")
 
     if args.channel_message is not None:
         args.channel_message = validate_test_message(
@@ -359,6 +392,17 @@ def validate_args(
             "--churn-bots requires --concurrent (each churn bot opens its own "
             "SDK connection)"
         )
+    if args.continuous_scan:
+        if not args.concurrent:
+            raise TeamTalkConfigurationError(
+                "--continuous-scan requires --concurrent (each spawned bot "
+                "opens its own SDK connection)"
+            )
+        if not args.bot_per_channel and not args.bot_per_user:
+            raise TeamTalkConfigurationError(
+                "--continuous-scan requires --bot-per-channel and/or "
+                "--bot-per-user (it spawns those bots as it finds targets)"
+            )
     if args.bot_per_channel and not args.concurrent:
         raise TeamTalkConfigurationError(
             "--bot-per-channel requires --concurrent (each channel bot opens "
@@ -369,12 +413,13 @@ def validate_args(
             "--bot-per-user requires --concurrent (each user bot opens its own "
             "SDK connection)"
         )
-    if args.bot_per_channel and not (
+    if args.bot_per_channel and not args.continuous_scan and not (
         args.channel_message is not None or args.join_leave_cycles > 0
     ):
         raise TeamTalkConfigurationError(
             "--bot-per-channel requires a channel action (--channel-message or "
-            "--join-leave-cycles)"
+            "--join-leave-cycles) — or --continuous-scan, where the bots join "
+            "and idle in their channels"
         )
     if args.bot_per_user and args.private_message is None:
         raise TeamTalkConfigurationError(
@@ -385,6 +430,9 @@ def validate_args(
             args.private_message is not None
             or channel_action
             or args.churn_bots > 0
+            # Continuous-scan occupancy: bots joining and idling in every
+            # channel is an action even with no message/cycle configured.
+            or (args.continuous_scan and args.bot_per_channel)
         )
         if not has_action:
             raise TeamTalkConfigurationError(
@@ -804,6 +852,61 @@ def _bot_config(base: Any, nickname: str) -> Any:
     )
 
 
+def _channel_nick_suffix(channel: dict[str, Any]) -> str:
+    """Nickname suffix naming a channel bot after its channel."""
+
+    name = str(channel.get("name") or "").strip()
+    if name:
+        return name
+    path = str(channel.get("path") or "").strip().strip("/")
+    if path:
+        return path
+    return str(channel.get("id"))
+
+
+def _user_nick_suffix(display: str) -> str:
+    """Nickname suffix naming a message bot after the user it messages.
+
+    ``display`` comes from ``_user_display`` — "Nick (@username)", "Nick", or
+    "@username" — so strip the parenthesised username and any leading "@".
+    """
+
+    text = str(display).strip()
+    if " (@" in text:
+        text = text.split(" (@", 1)[0].strip()
+    return text.lstrip("@") or "user"
+
+
+def _bot_nick(base: Any, suffix: str, fallback: str) -> str:
+    """Full bot nickname: the configured nickname plus the target's name."""
+
+    if suffix:
+        return f"{base.nickname}-{suffix}"
+    return f"{base.nickname}-{fallback}"
+
+
+def _is_own_bot(user: dict[str, Any], config: Any) -> bool:
+    """True when a discovered user is one of this run's own bots.
+
+    The continuous scanner must not spawn message bots for the bots it just
+    spawned, or the fleet would recursively grow forever.  Bots log in with
+    the run's own username and a "<nickname>-<target>" nickname, so match on
+    either.  (The operator's real client usually shares that username too —
+    and is the last person the message bots should target anyway.)
+    """
+
+    username = str(user.get("username") or "").strip()
+    if (
+        username
+        and getattr(config, "username", "")
+        and username.casefold() == str(config.username).casefold()
+    ):
+        return True
+    nickname = str(user.get("nickname") or "").strip()
+    prefix = f"{config.nickname}-".casefold()
+    return nickname.casefold().startswith(prefix)
+
+
 class _BotStop(Exception):
     """Raised inside a bot to signal it should stop (reconnect failed)."""
 
@@ -990,8 +1093,11 @@ def _user_bot(
     interval: float,
     sweep_interval: float,
     stop_event: threading.Event,
+    nick_suffix: str = "",
 ) -> None:
-    config = _bot_config(base_config, f"{base_config.nickname}-users")
+    config = _bot_config(
+        base_config, _bot_nick(base_config, nick_suffix, "users")
+    )
 
     if not all_users:
         # Finite mode: message the explicit target list, ``count`` each.  The
@@ -1081,10 +1187,14 @@ def _channel_bot(
     join_leave_cycles: int,
     interval: float,
     stop_event: threading.Event,
+    nick_suffix: str = "",
+    idle_when_done: bool = False,
 ) -> None:
-    config = _bot_config(base_config, f"{base_config.nickname}-channels")
+    config = _bot_config(
+        base_config, _bot_nick(base_config, nick_suffix, "channels")
+    )
     cycles = join_leave_cycles or (1 if channel_message is not None else 0)
-    if cycles == 0:
+    if cycles == 0 and not idle_when_done:
         return
     with TeamTalkSession(config) as session:
         for channel in channels:
@@ -1102,6 +1212,26 @@ def _channel_bot(
                 )
             session.rejoin_channel_id = channel_id
             session.rejoin_channel_password = channel_password
+            if cycles == 0:
+                # Continuous-scan occupancy mode: no message or cycle action
+                # is configured, so the bot joins the channel it is named
+                # after and sits there (rejoining after kicks) until stopped.
+                try:
+                    session.join_channel(channel_id, channel_password)
+                except TeamTalkError as exc:
+                    print(f"[channel-bot] could not join {channel_name}: {exc}")
+                    continue
+                print(
+                    f"[channel-bot] {channel_name}: joined; idling as "
+                    f"{config.nickname} until stopped."
+                )
+                while not stop_event.is_set():
+                    if not session.is_online():
+                        if not session.check_and_reconnect():
+                            print("[channel-bot] could not reconnect; stopping.")
+                            return
+                    stop_event.wait(1.0)
+                return
             # Only completed cycles count, and only delivered messages count:
             # after a kick the bot retries the interrupted send/cycle instead
             # of skipping it or restarting the numbering, so the channel gets
@@ -1212,10 +1342,15 @@ def _churn_bot(
 # ``stop_event`` is deliberately not part of the job: each worker creates its
 # own local event, so jobs stay picklable across process boundaries.
 #
-#   ("user", targets, all_users, message, count, interval, sweep_interval)
-#          targets = [(username_key, display), ...] — usernames, never IDs
+#   ("user", targets, all_users, message, count, interval, sweep_interval,
+#          nick_suffix)
+#          targets = [(username_key, display), ...] — usernames, never IDs;
+#          nick_suffix names the bot after the user it messages
 #   ("channel", channels, channel_password, channel_message, count,
-#               join_leave_cycles, interval)
+#               join_leave_cycles, interval, nick_suffix, idle_when_done)
+#          nick_suffix names the bot after the channel it joins;
+#          idle_when_done parks it in the channel after joining instead of
+#          doing join/leave cycles (continuous-scan occupancy)
 #   ("churn", index, total, cycles, interval)
 def _spawn_bot_thread(
     config: Any,
@@ -1226,22 +1361,28 @@ def _spawn_bot_thread(
 
     kind = job[0]
     if kind == "user":
-        _, targets, all_users, message, count, interval, sweep_interval = job
+        (
+            _, targets, all_users, message, count, interval, sweep_interval,
+            nick_suffix,
+        ) = job
         return threading.Thread(
             target=_user_bot,
             args=(
                 config, targets, all_users, message, count, interval,
-                sweep_interval, stop_event,
+                sweep_interval, stop_event, nick_suffix,
             ),
             daemon=True,
         )
     if kind == "channel":
-        _, channels, channel_password, channel_message, count, cycles, interval = job
+        (
+            _, channels, channel_password, channel_message, count, cycles,
+            interval, nick_suffix, idle_when_done,
+        ) = job
         return threading.Thread(
             target=_channel_bot,
             args=(
                 config, channels, channel_password, channel_message, count,
-                cycles, interval, stop_event,
+                cycles, interval, stop_event, nick_suffix, idle_when_done,
             ),
             daemon=True,
         )
@@ -1313,6 +1454,194 @@ def _max_concurrent_bots() -> int:
     return max(1, (ceiling - baseline) // fds_per_bot)
 
 
+def _run_continuous_scan(config: Any, args: argparse.Namespace) -> int:
+    """Keep scanning for all channels/users, spawning named bots for new ones.
+
+    A dedicated scanner session stays connected and every ``--scan-interval``
+    seconds (default 2) re-lists every channel and user on the server.  Each
+    newly seen channel gets one channel bot nicknamed
+    ``<nickname>-<channel name>`` that joins the channel it is named after
+    (idling in it when no channel action is configured); each newly seen user
+    gets one message bot nicknamed ``<nickname>-<user name>`` that
+    private-messages them.  Targets are remembered — channels by ID, users by
+    username, as everywhere in this suite — so a target is never handled
+    twice, and this run's own bots are never mistaken for targets.
+    """
+
+    scan_interval = max(0.05, float(args.scan_interval))
+    per_channel = bool(args.bot_per_channel)
+    per_user = bool(args.bot_per_user) and args.private_message is not None
+    channel_action = bool(
+        args.channel_message is not None or args.join_leave_cycles > 0
+    )
+
+    mode_bits = []
+    if per_channel:
+        if channel_action:
+            mode_bits.append(
+                f"a channel bot nicknamed \"{config.nickname}-<channel name>\" "
+                "joining its channel, then performing the configured action"
+            )
+        else:
+            mode_bits.append(
+                f"a channel bot nicknamed \"{config.nickname}-<channel name>\" "
+                "joining its channel and idling there"
+            )
+    if per_user:
+        mode_bits.append(
+            f"a message bot nicknamed \"{config.nickname}-<user name>\" sending "
+            f"{args.message_count} private message(s) to its user"
+        )
+    print(
+        f"Continuous scan plan: every {scan_interval:g}s discover all "
+        "available channels/users and spawn, for each new target, "
+        + " and ".join(mode_bits)
+        + ". Handled targets are never re-spawned. Press Ctrl+C to stop."
+    )
+
+    scanner_config = _bot_config(config, f"{config.nickname}-scanner")
+
+    if args.dry_run:
+        with TeamTalkSession(scanner_config) as session:
+            channels = session.list_channels()
+            deadline = time.monotonic() + 2.0
+            users = []
+            while time.monotonic() < deadline:
+                users = [
+                    user
+                    for user in _merge_channel_roster(
+                        session.list_users(include_self=False),
+                        _channel_roster(session),
+                    )
+                    if not _is_own_bot(user, config)
+                ]
+                if users:
+                    break
+                time.sleep(0.05)
+        print_discovery(channels, users)
+        print(
+            "Dry run complete; the inventory above is what the first scan "
+            "pass would spawn bots for."
+        )
+        return 0
+
+    # One SDK connection is spent on the scanner itself; the bots share the
+    # rest of the process's FD_SETSIZE budget, same ceiling as one-shot mode.
+    max_bots = max(1, _max_concurrent_bots() - 1)
+    stop_event = threading.Event()
+    threads: list[threading.Thread] = []
+    handled_channels: set[int] = set()
+    handled_users: set[str] = set()
+    warned_full = False
+
+    try:
+        with TeamTalkSession(scanner_config) as session:
+            print(
+                f"[scanner] watching for channels/users every "
+                f"{scan_interval:g}s (nickname {config.nickname}-scanner). "
+                "Press Ctrl+C to stop."
+            )
+            while not stop_event.is_set():
+                # Pump the SDK event queue so both rosters stay current; the
+                # drain also spends the scan interval, which is the cadence.
+                if _drain_events(session, stop_event, scan_interval):
+                    if not session.check_and_reconnect():
+                        print("[scanner] lost its connection; stopping.")
+                        break
+                    continue
+                try:
+                    channels = session.list_channels()
+                    users = _merge_channel_roster(
+                        session.list_users(include_self=False),
+                        _channel_roster(session),
+                    )
+                except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
+                    print(f"[scanner] discovery interrupted: {exc}")
+                    if not session.check_and_reconnect():
+                        print("[scanner] could not reconnect; stopping.")
+                        break
+                    continue
+
+                # Finished bots free their SDK connections for new ones.
+                threads = [thread for thread in threads if thread.is_alive()]
+                warned_full = warned_full and len(threads) >= max_bots
+
+                for channel in channels:
+                    if not per_channel or stop_event.is_set():
+                        break
+                    channel_id = int(channel["id"])
+                    if channel_id in handled_channels:
+                        continue
+                    if len(threads) >= max_bots:
+                        if not warned_full:
+                            print(
+                                f"[scanner] bot ceiling ({max_bots}) reached; "
+                                "new targets wait for a free slot."
+                            )
+                            warned_full = True
+                        break
+                    handled_channels.add(channel_id)
+                    suffix = _channel_nick_suffix(channel)
+                    job = (
+                        "channel", [channel], config.channel_password,
+                        args.channel_message, args.message_count,
+                        args.join_leave_cycles, args.interval,
+                        suffix, not channel_action,
+                    )
+                    thread = _spawn_bot_thread(config, job, stop_event)
+                    thread.start()
+                    threads.append(thread)
+                    print(
+                        f"[scanner] spawned channel-bot {config.nickname}-{suffix} "
+                        f"for {channel.get('path') or channel.get('name') or channel_id} "
+                        f"(id {channel_id})."
+                    )
+                for user in users:
+                    if not per_user or stop_event.is_set():
+                        break
+                    if _is_own_bot(user, config):
+                        continue
+                    key = _user_key(user)
+                    if key in handled_users:
+                        continue
+                    if len(threads) >= max_bots:
+                        if not warned_full:
+                            print(
+                                f"[scanner] bot ceiling ({max_bots}) reached; "
+                                "new targets wait for a free slot."
+                            )
+                            warned_full = True
+                        break
+                    handled_users.add(key)
+                    display = _user_display(user)
+                    suffix = _user_nick_suffix(display)
+                    job = (
+                        "user", [(key, display)], False,
+                        args.private_message, args.message_count,
+                        args.interval, args.sweep_interval, suffix,
+                    )
+                    thread = _spawn_bot_thread(config, job, stop_event)
+                    thread.start()
+                    threads.append(thread)
+                    print(
+                        f"[scanner] spawned message-bot "
+                        f"{config.nickname}-{suffix} for {display}."
+                    )
+    except KeyboardInterrupt:
+        print("\nInterrupted: signalling bots to stop...")
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=5.0)
+        print("Stopped.")
+        return 130
+
+    stop_event.set()
+    for thread in threads:
+        thread.join(timeout=5.0)
+    print("Continuous scan stopped.")
+    return 0
+
+
 def _run_concurrent(
     config: Any,
     args: argparse.Namespace,
@@ -1321,6 +1650,9 @@ def _run_concurrent(
     all_users: bool,
     all_channels: bool,
 ) -> int:
+    if getattr(args, "continuous_scan", False):
+        return _run_continuous_scan(config, args)
+
     # Discovery happens on a throwaway session; every worker bot then opens its
     # own connection so the per-user, per-channel, and churn work run in parallel.
     discovery_config = replace(config, channel_id=None, channel_path=None)
@@ -1370,7 +1702,8 @@ def _run_concurrent(
             plan_lines.append(
                 f"  {len(selected_users)} user-bot(s): one bot per user, each "
                 f"sending {args.message_count} private message(s) to its user "
-                "on its own SDK connection."
+                "on its own SDK connection, nicknamed "
+                f"\"{config.nickname}-<user name>\"."
             )
         elif all_users:
             plan_lines.append(
@@ -1388,7 +1721,9 @@ def _run_concurrent(
             plan_lines.append(
                 f"  {len(selected_channels)} channel-bot(s): one bot per "
                 f"channel ({args.join_leave_cycles or 0} join/leave cycle(s), "
-                f"{args.message_count} channel message(s) each)."
+                f"{args.message_count} channel message(s) each), nicknamed "
+                f"\"{config.nickname}-<channel name>\" and joining the channel "
+                "it is named after."
             )
         else:
             plan_lines.append(f"  1 channel-bot: {len(selected_channels)} channel(s).")
@@ -1428,6 +1763,7 @@ def _run_concurrent(
                         args.message_count,
                         args.interval,
                         args.sweep_interval,
+                        _user_nick_suffix(display),
                     )
                 )
         else:
@@ -1454,6 +1790,8 @@ def _run_concurrent(
                         args.message_count,
                         args.join_leave_cycles,
                         args.interval,
+                        _channel_nick_suffix(channel),
+                        False,
                     )
                 )
         else:
@@ -1706,6 +2044,20 @@ def interactive_run() -> int:
             "Spawn one bot per user for private messages (own connection each)?",
             False,
         )
+    continuous_scan = False
+    scan_interval = DEFAULT_SCAN_INTERVAL
+    if concurrent and (bot_per_channel or bot_per_user):
+        continuous_scan = prompt_yes_no(
+            "Continuously rescan for new channels/users and spawn a named "
+            "bot for each one?",
+            False,
+        )
+        if continuous_scan:
+            scan_interval = prompt_float(
+                "Seconds between scans",
+                DEFAULT_SCAN_INTERVAL,
+                minimum=0.05,
+            )
     sweep_interval = 0.5
     if concurrent and all_users:
         sweep_interval = prompt_float(
@@ -1731,6 +2083,8 @@ def interactive_run() -> int:
         churn_cycles=churn_cycles,
         bot_per_channel=bot_per_channel,
         bot_per_user=bot_per_user,
+        continuous_scan=continuous_scan,
+        scan_interval=scan_interval,
         interval=interval,
         sweep_interval=sweep_interval,
         dry_run=False,

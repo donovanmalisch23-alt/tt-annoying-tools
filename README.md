@@ -204,11 +204,14 @@ connection**:
 
 - `--bot-per-channel` spawns one channel-bot per discovered/selected channel
   (each joins and messages only its channel) instead of a single channel-bot
-  handling every channel.
+  handling every channel. Each bot is **nicknamed after its target**:
+  `<nickname>-<channel name>`, and it joins exactly the channel it is named
+  after.
 - `--bot-per-user` spawns one user-bot per selected user (each private-messages
-  only its assigned user) instead of a single user-bot messaging everyone. With
-  `--all-users` this snapshots the currently online users (one bot each); it
-  does **not** run the continuous new-joiner mode.
+  only its assigned user) instead of a single user-bot messaging everyone.
+  Each bot is nicknamed `<nickname>-<user name>` after the user it messages.
+  With `--all-users` this snapshots the currently online users (one bot each);
+  it does **not** run the continuous new-joiner mode.
 
 ```bash
 # One channel-bot per channel and one user-bot per user (3 users, 4 channels):
@@ -222,6 +225,44 @@ The number of per-target bots is bounded by the same file-descriptor ceiling as
 `--churn-bots` (each bot is a separate SDK connection and login); the suite
 refuses to start if the total concurrent bot count would exhaust the native
 library's `select()` reactor (see the concurrent-mode note above).
+
+### Continuous scan (`--continuous-scan`)
+
+`--continuous-scan` (requires `--concurrent` plus `--bot-per-channel` and/or
+`--bot-per-user`) turns the one-shot per-target fan-out into a watcher: a
+dedicated scanner session stays connected and automatically re-scans **all
+available channels and users** on the server every `--scan-interval` seconds
+(default `2`), forever, and spawns a bot for each target it has not handled
+yet:
+
+- a new channel gets one channel-bot nicknamed `<nickname>-<channel name>`
+  that joins the channel it is named after. With a channel action configured
+  (`--channel-message` / `--join-leave-cycles`) it performs that action as
+  usual; with none configured it simply **idles in the channel** (rejoining
+  after kicks) until you stop the run — one bot sitting in every channel.
+- a new user gets one message-bot nicknamed `<nickname>-<user name>` that
+  private-messages them `--message-count` times and exits.
+
+Targets are remembered (channels by ID, users by username, as everywhere in
+this suite), so nothing is ever handled twice, and the scanner never mistakes
+this run's own bots for targets (they share the configured username and the
+`<nickname>-` prefix). Discovery selection flags like `--all-users` /
+`--all-channels` are implied. Live bots count against the same
+file-descriptor ceiling as above; when the ceiling is reached the scanner
+holds new targets until a slot frees up.
+
+```bash
+# Watch the server, re-scanning every 2 s: a bot idling in every channel
+# (named "<nickname>-<channel name>") plus one welcome DM to every joiner:
+python3 tt_suite.py --concurrent --continuous-scan \
+  --bot-per-channel --bot-per-user \
+  --private-message 'welcome aboard' --message-count 1 \
+  --scan-interval 2 --confirm
+
+# Preview what the first scan pass would spawn bots for:
+python3 tt_suite.py --dry-run --concurrent --continuous-scan \
+  --bot-per-channel --bot-per-user --private-message 'hi'
+```
 
 With `--all-users` (or `--user-id all`) the user-bot runs in **continuous
 mode**: instead of messaging a fixed list once, it keeps re-discovering the

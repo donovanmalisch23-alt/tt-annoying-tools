@@ -255,6 +255,48 @@ class TestValidateArgs:
                 )
             )
 
+    def test_continuous_scan_needs_concurrent(self):
+        with pytest.raises(TeamTalkConfigurationError, match="--continuous-scan requires --concurrent"):
+            tt_suite.validate_args(
+                parse(
+                    ["--host", "h", "--continuous-scan", "--bot-per-channel", "--confirm"]
+                )
+            )
+
+    def test_continuous_scan_needs_a_bot_kind(self):
+        with pytest.raises(TeamTalkConfigurationError, match="--bot-per-channel and/or --bot-per-user"):
+            tt_suite.validate_args(
+                parse(
+                    ["--host", "h", "--concurrent", "--continuous-scan",
+                     "--private-message", "m", "--all-users", "--confirm"]
+                )
+            )
+
+    def test_continuous_scan_channel_bots_may_idle(self):
+        # No --channel-message and no --join-leave-cycles: with
+        # --continuous-scan the channel bots join and idle instead.
+        args = parse(
+            ["--host", "h", "--concurrent", "--continuous-scan",
+             "--bot-per-channel", "--confirm"]
+        )
+        ids, names, all_users, all_channels = tt_suite.validate_args(args)
+        assert all_users is True and all_channels is True
+        assert args.continuous_scan is True
+
+    def test_continuous_scan_defaults_to_two_seconds(self):
+        args = parse(["--host", "h", "--concurrent", "--continuous-scan",
+                      "--bot-per-channel", "--confirm"])
+        assert args.scan_interval == 2.0
+
+    def test_scan_interval_negative_rejected(self):
+        with pytest.raises(TeamTalkConfigurationError, match="--scan-interval"):
+            tt_suite.validate_args(
+                parse(
+                    ["--host", "h", "--concurrent", "--continuous-scan",
+                     "--bot-per-channel", "--scan-interval", "-1", "--confirm"]
+                )
+            )
+
     def test_comma_counts(self):
         args = parse(["--host", "h", "--message-count", "1,000"])
         assert args.message_count == 1000
@@ -396,8 +438,8 @@ class TestSmallHelpers:
     def test_spawn_bot_thread_kinds(self):
         config = tt_teamtalk.ConnectionConfig(host="h", nickname="n")
         stop = threading.Event()
-        user_job = ("user", [("amy", "Amy")], False, "m", 1, 0.0, 0.5)
-        channel_job = ("channel", [{"id": 1}], "", "m", 1, 1, 0.0)
+        user_job = ("user", [("amy", "Amy")], False, "m", 1, 0.0, 0.5, "Amy")
+        channel_job = ("channel", [{"id": 1}], "", "m", 1, 1, 0.0, "lobby", False)
         churn_job = ("churn", 1, 1, 2, 0.0)
         for job in (user_job, channel_job, churn_job):
             thread = tt_suite._spawn_bot_thread(config, job, stop)
@@ -924,6 +966,193 @@ class TestChannelBot:
         assert created[0].joins == []
         out = capsys.readouterr().out
         assert "could not join" in out
+
+    def test_nick_suffix_names_the_bot(self, tool_session_factory, monkeypatch):
+        factory, created = tool_session_factory
+        monkeypatch.setattr(tt_suite, "TeamTalkSession", factory())
+        tt_suite._channel_bot(
+            tt_teamtalk.ConnectionConfig(host="h", nickname="n", accept_sdk_license=True),
+            [{"id": 4, "name": "lobby", "path": "/lobby"}],
+            "", "msg", 1, 1, 0, threading.Event(), nick_suffix="lobby",
+        )
+        assert created[0].config.nickname == "n-lobby"
+
+    def test_idle_mode_joins_and_parks(self, tool_session_factory, monkeypatch, capsys):
+        factory, created = tool_session_factory
+        monkeypatch.setattr(tt_suite, "TeamTalkSession", factory())
+        stop = threading.Event()
+        threading.Timer(0.05, stop.set).start()
+        tt_suite._channel_bot(
+            tt_teamtalk.ConnectionConfig(host="h", nickname="n", accept_sdk_license=True),
+            [{"id": 4, "name": "lobby", "path": "/lobby"}],
+            "", None, 1, 0, 0, stop, nick_suffix="lobby", idle_when_done=True,
+        )
+        session = created[0]
+        assert session.joins == [(4, "")]
+        assert session.leaves == 0  # it parks; it does not cycle out
+        assert session.config.nickname == "n-lobby"
+        assert "idling as n-lobby" in capsys.readouterr().out
+
+    def test_idle_mode_join_failure_moves_on(self, tool_session_factory, monkeypatch, capsys):
+        factory, _created = tool_session_factory
+        monkeypatch.setattr(tt_suite, "TeamTalkSession", factory(fail_join_ids={4}))
+        tt_suite._channel_bot(
+            tt_teamtalk.ConnectionConfig(host="h", nickname="n", accept_sdk_license=True),
+            [{"id": 4, "name": "A", "path": "/A"}],
+            "", None, 1, 0, 0, threading.Event(), nick_suffix="A", idle_when_done=True,
+        )
+        out = capsys.readouterr().out
+        assert "could not join" in out
+
+
+class TestBotNicknames:
+    def test_channel_nick_suffix_prefers_name(self):
+        assert (
+            tt_suite._channel_nick_suffix({"id": 4, "name": "lobby", "path": "/lobby"})
+            == "lobby"
+        )
+
+    def test_channel_nick_suffix_falls_back_to_path_then_id(self):
+        assert tt_suite._channel_nick_suffix({"id": 4, "name": "", "path": "/deep/room"}) == "deep/room"
+        assert tt_suite._channel_nick_suffix({"id": 7, "name": "", "path": ""}) == "7"
+
+    def test_user_nick_suffix_strips_display_decoration(self):
+        assert tt_suite._user_nick_suffix("Amy (@amy)") == "Amy"
+        assert tt_suite._user_nick_suffix("Amy") == "Amy"
+        assert tt_suite._user_nick_suffix("@amy") == "amy"
+        assert tt_suite._user_nick_suffix("  ") == "user"
+
+    def test_is_own_bot_matches_username_and_nick_prefix(self):
+        config = tt_teamtalk.ConnectionConfig(
+            host="h", nickname="suite", username="op"
+        )
+        by_username = {"username": "op", "nickname": "whatever"}
+        by_prefix = {"username": "", "nickname": "Suite-scanner"}
+        stranger = {"username": "amy", "nickname": "Amy"}
+        assert tt_suite._is_own_bot(by_username, config) is True
+        assert tt_suite._is_own_bot(by_prefix, config) is True
+        assert tt_suite._is_own_bot(stranger, config) is False
+
+
+class TestContinuousScan:
+    def _config(self):
+        return tt_teamtalk.ConnectionConfig(
+            host="h", nickname="suite", username="op", accept_sdk_license=True
+        )
+
+    def _args(self, **overrides):
+        options = dict(
+            bot_per_channel=True,
+            bot_per_user=True,
+            private_message="hi",
+            channel_message=None,
+            join_leave_cycles=0,
+            message_count=1,
+            interval=0.0,
+            sweep_interval=0.05,
+            scan_interval=0.05,
+            dry_run=False,
+            confirm=True,
+        )
+        options.update(overrides)
+        return argparse.Namespace(**options)
+
+    def _channel(self, cid, name):
+        return {
+            "id": cid, "name": name, "path": f"/{name}",
+            "password_required": False, "parent_id": 1, "hidden": False,
+        }
+
+    def _user(self, uid, username, nickname):
+        return {
+            "id": uid, "username": username, "nickname": nickname,
+            "display_name": nickname or username, "channel_id": 1,
+            "channel_path": "/",
+        }
+
+    def _stop_after_passes(self, monkeypatch, passes):
+        """Patch _drain_events so the scanner stops after N passes."""
+        real_drain = tt_suite._drain_events
+        calls = {"n": 0}
+
+        def drain(session, stop_event, window_s):
+            result = real_drain(session, stop_event, window_s)
+            calls["n"] += 1
+            if calls["n"] >= passes:
+                stop_event.set()
+            return result
+
+        monkeypatch.setattr(tt_suite, "_drain_events", drain)
+
+    def test_spawns_named_bots_for_each_target_once(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        factory, created = tool_session_factory
+        channels = [self._channel(4, "lobby")]
+        users = [
+            self._user(5, "amy", "Amy"),
+            # The scanner's own bots: it must never spawn message bots for them.
+            self._user(8, "op", "someone"),
+            self._user(9, "", "suite-scanner"),
+        ]
+        monkeypatch.setattr(
+            tt_suite, "TeamTalkSession", factory(channels=channels, users=users)
+        )
+        self._stop_after_passes(monkeypatch, passes=2)
+
+        rc = tt_suite._run_continuous_scan(self._config(), self._args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "spawned channel-bot suite-lobby" in out
+        assert "spawned message-bot suite-Amy" in out
+        # Two passes over the same inventory: still exactly one of each bot.
+        assert out.count("spawned channel-bot") == 1
+        assert out.count("spawned message-bot") == 1
+        nicknames = sorted(session.config.nickname for session in created)
+        assert nicknames == ["suite-Amy", "suite-lobby", "suite-scanner"]
+        # The message bot delivered to amy's ID; the channel bot joined lobby.
+        message_bot = next(s for s in created if s.config.nickname == "suite-Amy")
+        channel_bot = next(s for s in created if s.config.nickname == "suite-lobby")
+        assert message_bot.private_messages == [("hi", 5)]
+        assert channel_bot.joins == [(4, "")]
+
+    def test_bot_ceiling_caps_spawning(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        factory, _created = tool_session_factory
+        channels = [self._channel(4, "lobby"), self._channel(5, "other")]
+        monkeypatch.setattr(
+            tt_suite, "TeamTalkSession", factory(channels=channels, users=[])
+        )
+        monkeypatch.setattr(tt_suite, "_max_concurrent_bots", lambda: 2)
+        self._stop_after_passes(monkeypatch, passes=2)
+
+        rc = tt_suite._run_continuous_scan(
+            self._config(), self._args(bot_per_user=False, private_message=None)
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "spawned channel-bot suite-lobby" in out
+        assert "suite-other" not in out
+        assert "bot ceiling" in out
+
+    def test_dry_run_spawns_nothing(
+        self, tool_session_factory, monkeypatch, capsys
+    ):
+        factory, created = tool_session_factory
+        channels = [self._channel(4, "lobby")]
+        users = [self._user(5, "amy", "Amy")]
+        monkeypatch.setattr(
+            tt_suite, "TeamTalkSession", factory(channels=channels, users=users)
+        )
+
+        rc = tt_suite._run_continuous_scan(self._config(), self._args(dry_run=True))
+        assert rc == 0
+        assert len(created) == 1  # the scan session only; no bots
+        out = capsys.readouterr().out
+        assert "Dry run complete" in out
+        assert "spawned channel-bot" not in out
+        assert "spawned message-bot" not in out
 
 
 class TestChurnBot:
