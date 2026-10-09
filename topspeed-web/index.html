@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="theme-color" content="#0b0d12">
+    <title>Top Speed</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <section id="splash" aria-labelledby="splash-title">
+        <h1 id="splash-title">Top Speed</h1>
+        <p class="tagline">Audio racing game</p>
+        <button id="start-button" type="button" autofocus>Tap to start</button>
+        <p class="hint">Turn your sound on. Headphones give the best sense of the road.</p>
+        <noscript><p>Top Speed needs JavaScript.</p></noscript>
+    </section>
+
+    <main id="menu" hidden></main>
+
+    <div id="loading" role="status" hidden>Loading…</div>
+
+    <section id="race" hidden role="application" aria-label="Race. Bottom half drives, top left and top right give race information. Swipe down in the top left for the race menu.">
+        <div class="zone zone-left" aria-hidden="true"><span>Info · hold for clutch</span></div>
+        <div class="zone zone-right" aria-hidden="true"><span>Info · hold for horn</span></div>
+        <div class="zone zone-vehicle" aria-hidden="true"><span>Drive · drag to steer, accelerate and brake</span></div>
+        <div id="hud" aria-hidden="true"></div>
+    </section>
+
+    <div id="live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>

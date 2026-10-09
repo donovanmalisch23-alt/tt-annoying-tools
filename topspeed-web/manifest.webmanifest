@@ -1,0 +1,10 @@
+{
+  "name": "Top Speed",
+  "short_name": "Top Speed",
+  "description": "Audio racing game for mobile browsers, a web port of the Top Speed remake.",
+  "start_url": "./index.html",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12"
+}

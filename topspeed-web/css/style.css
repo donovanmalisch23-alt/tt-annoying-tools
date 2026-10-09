@@ -1,0 +1,177 @@
+:root {
+    --bg: #0b0d12;
+    --panel: #151923;
+    --text: #eef1f6;
+    --muted: #9aa3b5;
+    --accent: #ffb020;
+    --accent-ink: #1a1200;
+    --line: #2a3142;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font: 18px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* The game handles all touches itself: no scrolling, zooming or text selection. */
+    touch-action: none;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    overflow: hidden;
+}
+
+[hidden] { display: none !important; }
+
+#splash {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 24px max(16px, env(safe-area-inset-left));
+    text-align: center;
+}
+
+#splash h1 { font-size: 44px; margin: 0; letter-spacing: 0.02em; }
+.tagline { margin: 0; color: var(--muted); }
+.hint { color: var(--muted); font-size: 15px; max-width: 32em; }
+
+#start-button {
+    margin-top: 20px;
+    font: inherit;
+    font-size: 24px;
+    font-weight: 600;
+    padding: 22px 48px;
+    border-radius: 16px;
+    border: 0;
+    background: var(--accent);
+    color: var(--accent-ink);
+}
+
+#menu {
+    position: fixed;
+    inset: 0;
+    z-index: 2;
+    background: var(--bg);
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+#menu h1 { font-size: 26px; margin: 4px 0 12px; }
+
+.menu-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    padding-bottom: 24px;
+}
+
+.menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: var(--text);
+    background: var(--panel);
+    border: 2px solid transparent;
+    border-radius: 10px;
+    padding: 12px 14px;
+}
+
+.menu-item.selected {
+    border-color: var(--accent);
+    background: #1f2533;
+}
+
+.menu-item.text { color: var(--muted); }
+
+.menu-item.slider span { display: block; margin-bottom: 6px; }
+.menu-item.slider input { width: 100%; }
+
+#loading {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+}
+
+#race {
+    position: fixed;
+    inset: 0;
+}
+
+.zone {
+    position: absolute;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 10px;
+    color: var(--muted);
+    font-size: 13px;
+    border: 1px dashed var(--line);
+}
+
+/* Labels sit at the outer edges so the HUD in the middle stays clear. */
+.zone-left { left: 0; top: 0; width: 50%; height: 50%; align-items: flex-start; padding-top: max(10px, env(safe-area-inset-top)); }
+.zone-right { left: 50%; top: 0; width: 50%; height: 50%; align-items: flex-start; padding-top: max(10px, env(safe-area-inset-top)); }
+.zone-vehicle { left: 0; top: 50%; width: 100%; height: 50%; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+
+#hud {
+    position: absolute;
+    z-index: 1;
+    background: var(--bg);
+    padding: 8px 16px;
+    border-radius: 12px;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+    min-width: 220px;
+}
+
+.hud-speed { font-size: 40px; font-weight: 700; color: var(--accent); }
+
+.hud-lane {
+    position: relative;
+    height: 8px;
+    margin-top: 10px;
+    border-radius: 4px;
+    background: var(--line);
+}
+
+.hud-lane span {
+    position: absolute;
+    top: -4px;
+    width: 16px;
+    height: 16px;
+    margin-left: -8px;
+    border-radius: 50%;
+    background: var(--accent);
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
