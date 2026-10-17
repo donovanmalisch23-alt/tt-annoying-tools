@@ -14,6 +14,10 @@ import pytest
 import tt_loic
 from tt_teamtalk import ConnectionConfig, TeamTalkConfigurationError, TeamTalkError
 
+# The target-gate tests read a whitelist that exists on every machine, not
+# the operator's gitignored one.
+pytestmark = pytest.mark.usefixtures("hermetic_whitelist")
+
 
 def namespace(**overrides):
     args = dict(

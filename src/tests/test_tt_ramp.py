@@ -20,6 +20,10 @@ import tt_ramp
 from tt_loic import FloodStats, ProbeResult
 from tt_teamtalk import ConnectionConfig, TeamTalkConfigurationError
 
+# The gate tests read a whitelist that exists on every machine, not the
+# operator's gitignored one (tt_ramp checks it even for loopback).
+pytestmark = pytest.mark.usefixtures("hermetic_whitelist")
+
 
 def namespace(**overrides):
     args = dict(

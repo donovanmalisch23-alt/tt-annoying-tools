@@ -38,6 +38,25 @@ sys.path.insert(0, str(REPO_ROOT))
 import tt_teamtalk  # noqa: E402  (after env isolation, on purpose)
 
 
+@pytest.fixture
+def hermetic_whitelist(tmp_path, monkeypatch):
+    """A known whitelist.txt for the target-gate tests.
+
+    The real whitelist.txt is gitignored and operator-maintained, so it
+    exists only on the operator's machine — a CI checkout has none, and
+    tt_ramp reads the whitelist even for loopback targets. Tests that
+    exercise the gate need a file with exactly the hosts they expect (and
+    without the ones they refuse): it is installed in a temp directory
+    that is also the CWD (the gate reads a bare relative path) and pointed
+    at through TT_WHITELIST (the parser's --whitelist default).
+    """
+
+    whitelist = tmp_path / "whitelist.txt"
+    whitelist.write_text("127.0.0.1\nparalleledition.xyz\n", encoding="utf-8")
+    monkeypatch.setenv("TT_WHITELIST", str(whitelist))
+    monkeypatch.chdir(tmp_path)
+
+
 # --------------------------------------------------------------------------- #
 # Fake TeamTalk5 SDK (emulates the ctypes interface in memory)
 # --------------------------------------------------------------------------- #
