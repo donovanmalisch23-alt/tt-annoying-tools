@@ -67,8 +67,8 @@ jobs:
             echo "::group::pyinstaller $tool"
             pyinstaller --noconfirm --clean --onefile "$tool.py" \
               --add-data "$TT5SDK_ROOT/Library/TeamTalkPy/TeamTalk5.py;sdk" \
-              --add-data "$TT5SDK_ROOT/Library/TeamTalk_DLL/TeamTalk5.dll;sdk" \
-              --add-data "sdk/License.txt;sdk"
+              --add-data "sdk/License.txt;sdk" \
+              --add-data "$TT5SDK_ROOT/Library/TeamTalk_DLL/TeamTalk5.dll;TeamTalk_DLL"
             echo "::endgroup::"
           done
           ls -lh dist/*.exe
