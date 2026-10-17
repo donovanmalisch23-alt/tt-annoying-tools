@@ -1,0 +1,171 @@
+name: Windows tools
+
+# Builds every Python tool into a standalone Windows .exe, bundling the
+# official TeamTalk 5 SDK (Windows trial edition) inside each one, and
+# attaches the zip to a GitHub release — so Windows testers get a download
+# link instead of a Python setup. Run it from the Actions tab, or push a
+# `tools-v*` tag.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update (blank: tools-v0.1.0-alpha-soft)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "tools-v*"
+
+permissions:
+  contents: write
+
+env:
+  # Keep in step with the SDK version the README documents.
+  TT_SDK_VERSION: "5.23a"
+
+jobs:
+  windows:
+    name: Build and publish the Windows exes
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: pip install pyinstaller pytest
+
+      # The vendored sdk/ carries the Linux library, so the Windows build
+      # downloads the official per-platform SDK trial instead. Its
+      # TeamTalk5.py and TeamTalk5.dll are baked into every exe through
+      # --add-data into an sdk/ folder beside the frozen module — exactly
+      # where tt_teamtalk.py's loader looks — so the exes are self-contained
+      # and users never set TEAMTALK_SDK_PATH.
+      - name: Download the TeamTalk 5 SDK for Windows
+        shell: bash
+        run: |
+          curl -sS -L -o tt5sdk.7z \
+            "https://www.bearware.dk/teamtalksdk/v${TT_SDK_VERSION}/tt5sdk_v${TT_SDK_VERSION}_win64.7z"
+          7z x -y tt5sdk.7z > /dev/null
+          root="$PWD/tt5sdk_v${TT_SDK_VERSION}_win64"
+          test -f "$root/Library/TeamTalkPy/TeamTalk5.py"
+          test -f "$root/Library/TeamTalk_DLL/TeamTalk5.dll"
+          echo "TT5SDK_ROOT=$root" >> "$GITHUB_ENV"
+
+      - name: Build the tools
+        shell: bash
+        run: |
+          tools="tt_message_spammer tt_spammer tt_leave_join_spammer ttbot_the_offender tt_suite tt_loic tt_ramp tt_concurrent_bots"
+          for tool in $tools; do
+            echo "::group::pyinstaller $tool"
+            pyinstaller --noconfirm --clean --onefile "$tool.py" \
+              --add-data "$TT5SDK_ROOT/Library/TeamTalkPy/TeamTalk5.py;sdk" \
+              --add-data "$TT5SDK_ROOT/Library/TeamTalk_DLL/TeamTalk5.dll;sdk" \
+              --add-data "sdk/License.txt;sdk"
+            echo "::endgroup::"
+          done
+          ls -lh dist/*.exe
+
+      - name: Run the hermetic test suite
+        shell: bash
+        run: python -m pytest src/tests -q
+
+      # A failed connection is the expected outcome here — it proves the
+      # frozen exe loaded the bundled DLL and got as far as dialing a
+      # server. An SDK load failure instead prints the bearware.dk download
+      # hint, which fails this check.
+      - name: Smoke-test a frozen exe loads the bundled SDK
+        shell: bash
+        env:
+          TT_ACCEPT_SDK_LICENSE: "1"
+        run: |
+          status=0
+          ./dist/tt_spammer.exe --host 127.0.0.1 --tcp-port 1 --cycles 1 > smoke.log 2>&1 || status=$?
+          cat smoke.log
+          if grep -q "page_id=419" smoke.log; then
+            echo "::error::the frozen exe failed to load the TeamTalk SDK"
+            exit 1
+          fi
+          if [ "$status" -eq 0 ]; then
+            echo "::error::expected the connection attempt to fail"
+            exit 1
+          fi
+          echo "Frozen exe loaded the SDK and reached the connection attempt."
+
+      - name: Package the artifact
+        id: artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            ref="${GITHUB_REF_NAME}"
+            case "$ref" in
+              tools-v*) tag="$ref" ;;
+              *) tag="tools-v0.1.0-alpha-soft" ;;
+            esac
+          fi
+          version="${tag#tools-v}"
+          name="tt-tools-$version-windows-x64.zip"
+          {
+            echo "TeamTalk Annoying Tools — Windows build (x64)"
+            echo ""
+            echo "Standalone executables of the Python tool suite:"
+            echo ""
+            echo "  tt_message_spammer.exe     channel/private text message sequence"
+            echo "  tt_spammer.exe              repeated login/logout cycles"
+            echo "  tt_leave_join_spammer.exe   channel leave/join test"
+            echo "  ttbot_the_offender.exe       trigger-based response bot"
+            echo "  tt_suite.exe                 discovery + combined consent-aware tests"
+            echo "  tt_loic.exe                  LOIC-style flood modes (whitelisted hosts only)"
+            echo "  tt_ramp.exe                  ramped breaking-point capacity test"
+            echo "  tt_concurrent_bots.exe       idle bots occupying a channel"
+            echo ""
+            echo "Run any tool with no arguments to be prompted for every setting, or"
+            echo "pass --help for its flags. The first run asks you to accept the"
+            echo "TeamTalk 5 SDK license once (per Windows user account)."
+            echo ""
+            echo "Notes"
+            echo "-----"
+            echo "- The bundled TeamTalk 5 SDK runs in TRIAL MODE and self-disables"
+            echo "  after 30 days of use. The tools themselves never expire; refresh"
+            echo "  the SDK or license it from BearWare.dk (see the repo README)."
+            echo "- tt_suite and tt_loic only run against hosts in whitelist.txt"
+            echo "  next to the exe (copy whitelist.txt.example to get started)."
+            echo "- Source: https://github.com/donovanmalisch23-alt/tt-annoying-tools"
+          } > README.txt
+          7z a "$name" ./dist/*.exe README.txt
+          7z l "$name"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.artifact.outputs.tag }}"
+          # A tag push may point at a tag with no release yet.
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+            --title "CLI tools ${tag#tools-v}" --prerelease \
+            --notes "Windows and Python tool builds for $tag."
+          gh release upload "$tag" "${{ steps.artifact.outputs.name }}" --clobber
+          # Append a Windows section to the release notes.
+          gh release view "$tag" --json body -q .body > notes.md
+          cat >> notes.md <<'EOF'
+
+          ## Windows binaries
+
+          `tt-tools-<version>-windows-x64.zip` contains a standalone `.exe` for
+          every tool — no Python install needed. Each exe bundles the official
+          TeamTalk 5 SDK (Windows trial edition), so it asks you to accept the
+          SDK license on first run and self-disables after 30 days of SDK trial
+          use, same as the Linux version.
+          EOF
+          gh release edit "$tag" --notes-file notes.md
