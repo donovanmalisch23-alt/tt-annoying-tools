@@ -66,6 +66,7 @@ jobs:
           for tool in $tools; do
             echo "::group::pyinstaller $tool"
             pyinstaller --noconfirm --clean --onefile "$tool.py" \
+              --hidden-import ctypes.wintypes \
               --add-data "$TT5SDK_ROOT/Library/TeamTalkPy/TeamTalk5.py;sdk" \
               --add-data "sdk/License.txt;sdk" \
               --add-data "$TT5SDK_ROOT/Library/TeamTalk_DLL/TeamTalk5.dll;TeamTalk_DLL"
