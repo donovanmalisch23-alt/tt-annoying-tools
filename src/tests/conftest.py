@@ -54,6 +54,8 @@ class FakeClientEvent:
     CLIENTEVENT_CMD_MYSELF_LOGGEDIN = 8
     CLIENTEVENT_CMD_MYSELF_LOGGEDOUT = 9
     CLIENTEVENT_CMD_USER_TEXTMSG = 10
+    CLIENTEVENT_CMD_USER_LOGGEDIN = 11
+    CLIENTEVENT_CMD_USER_LOGGEDOUT = 12
 
 
 class FakeTextMsgType:
@@ -474,6 +476,12 @@ class FakeToolSession:
         if self.poll_script:
             return self.poll_script.pop(0)
         return types.SimpleNamespace(nClientEvent=0)
+
+    def receive_text(self, timeout_ms: int = 1000) -> Any:
+        """Text-only receive path for tools that do not scan command acks."""
+
+        return self.poll(timeout_ms)
+
 
 
 @pytest.fixture

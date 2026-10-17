@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from tt_teamtalk import (
+    parse_args_with_prompts,
     ConnectionConfig,
     TeamTalkConfigurationError,
     TeamTalkError,
@@ -59,7 +60,6 @@ from tt_suite import (
     DEFAULT_WHITELIST,
     ensure_server_allowed,
 )
-from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -217,7 +217,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm", action="store_true",
         help="required: confirms this deliberate flood against the target",
     )
-    add_profile_argument(parser)
     return parser
 
 
@@ -856,7 +855,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if not actual_argv:
             return interactive_run()
-        return run(parse_args_with_profile(build_parser(), actual_argv))
+        return run(parse_args_with_prompts(build_parser(), actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)
     except (EOFError, KeyboardInterrupt):

@@ -39,12 +39,12 @@ from tt_teamtalk import (
     comma_int,
     config_dir,
     config_from_args,
+    parse_args_with_prompts,
     print_tool_error,
     prompt_connection_config,
     prompt_int,
     prompt_yes_no,
 )
-from tt_profile import add_profile_argument, parse_args_with_profile
 
 PROJECT_DIR = config_dir()
 DEFAULT_WHITELIST = PROJECT_DIR / "whitelist.txt"
@@ -254,7 +254,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm the idle-bot launch (required unless --dry-run)",
     )
-    add_profile_argument(parser)
     return parser
 
 
@@ -376,7 +375,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not actual_argv:
             return interactive_run()
         parser = build_parser()
-        args = parse_args_with_profile(parser, actual_argv)
+        args = parse_args_with_prompts(parser, actual_argv)
         validate_args(args)
         return run(args)
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:

@@ -22,14 +22,15 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
+    parse_args_with_prompts,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
     prompt_int,
     prompt_text,
     prompt_yes_no,
+    stdin_is_interactive,
 )
-from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 MAX_PRIVATE_RECIPIENTS = 20
@@ -104,7 +105,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WAIT,
         help=f"seconds to wait before the first SDK send (maximum {MAX_WAIT:g})",
     )
-    add_profile_argument(parser)
     return parser
 
 
@@ -188,6 +188,25 @@ def parse_user_names(values: object) -> list[str]:
     return user_names
 
 
+def _prompt_private_recipient() -> list[str]:
+    """Ask for a recipient username, or refuse when nobody can answer.
+
+    ``--target private`` with no ``--user``/``--user-id`` used to stop
+    dead; on a terminal it now asks.  Without a terminal (scripts,
+    tests) it raises the same error as before.
+    """
+    if not stdin_is_interactive():
+        raise TeamTalkConfigurationError(
+            "at least one --user or --user-id is required for private messages"
+        )
+    print("No recipient was given for --target private.")
+    while True:
+        name = prompt_text("Private message recipient username")
+        if name:
+            return [name]
+        print("Please enter a username.")
+
+
 def validate_args(args: argparse.Namespace) -> list[int]:
     user_ids = parse_user_ids(args.user_id)
     user_names = parse_user_names(args.user)
@@ -199,9 +218,9 @@ def validate_args(args: argparse.Namespace) -> list[int]:
         raise TeamTalkConfigurationError(f"--wait must be between 0 and {MAX_WAIT:g}s")
     if args.target == "private":
         if not user_ids and not user_names:
-            raise TeamTalkConfigurationError(
-                "at least one --user or --user-id is required for private messages"
-            )
+            user_names = _prompt_private_recipient()
+            # run() re-reads args.user, so the answer has to land there.
+            args.user = list(user_names)
         if len(user_ids) + len(user_names) > MAX_PRIVATE_RECIPIENTS:
             raise TeamTalkConfigurationError(
                 f"private messages support at most {MAX_PRIVATE_RECIPIENTS} recipients "
@@ -628,6 +647,7 @@ def send_messages_on_session(
         recipient_names
     )
     _enrich_name_displays(session, recipients)
+
     for index in range(count):
         for recipient_index, recipient in enumerate(recipients, start=1):
             while True:
@@ -635,7 +655,7 @@ def send_messages_on_session(
                 if user_id is None:
                     # An anonymous recipient (raw ID only) has no name to be
                     # re-found by, and a name that was never online this run
-                    # (a typo, say) has no logout to wait out: skip either
+                    # (a typo, say) has nothing to wait out: skip either
                     # rather than parking the run forever.  A recipient who
                     # was online earlier and logged out stops the sending and
                     # waits for the username to return.
@@ -751,7 +771,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not actual_argv:
             return interactive_run()
         parser = build_parser()
-        return run(parse_args_with_profile(parser, actual_argv))
+        return run(parse_args_with_prompts(parser, actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)
     except (EOFError, KeyboardInterrupt):

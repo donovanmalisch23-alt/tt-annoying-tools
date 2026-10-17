@@ -423,18 +423,6 @@ class TestSmallHelpers:
         assert bot.channel_password == ""
         assert base.nickname == "base"  # original untouched
 
-    def test_merge_channel_roster_dedupes(self):
-        users = [{"id": 5, "display_name": "zed"}]
-        roster = {
-            1: [
-                {"id": 2, "display_name": "amy"},
-                {"id": 5, "display_name": "zed-duplicate"},
-            ]
-        }
-        merged = tt_suite._merge_channel_roster(users, roster)
-        assert [u["id"] for u in merged] == [2, 5]
-        assert merged[1]["display_name"] == "zed"  # server roster wins
-
     def test_spawn_bot_thread_kinds(self):
         config = tt_teamtalk.ConnectionConfig(host="h", nickname="n")
         stop = threading.Event()

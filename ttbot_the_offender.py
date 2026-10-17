@@ -22,6 +22,7 @@ from tt_teamtalk import (
     add_connection_arguments,
     comma_int,
     config_from_args,
+    parse_args_with_prompts,
     message_fields,
     print_tool_error,
     sdk_event,
@@ -30,7 +31,6 @@ from tt_teamtalk import (
     prompt_text,
     prompt_yes_no,
 )
-from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 MIN_COOLDOWN = 5.0
@@ -92,7 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm unlimited bot operation when --max-responses 0 is used",
     )
-    add_profile_argument(parser)
     return parser
 
 
@@ -262,7 +261,12 @@ def run(args: argparse.Namespace, config=None) -> int:
         )
 
         while args.max_responses == 0 or response_count < args.max_responses:
-            message = session.poll(1000)
+            # Stay on the text queue in the common case; only fall back to
+            # the general poll when no text message arrived so command/state
+            # events (including connection failures) still get processed.
+            message = session.receive_text(1000)
+            if not getattr(message, "nClientEvent", 0):
+                message = session.poll(0)
             # Catch a server kick the moment the CON_LOST/CON_FAILED event is
             # dequeued, instead of relying on the getMyUserID() watchdog below.
             if session.is_connection_failure(message):
@@ -377,7 +381,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not actual_argv:
             return interactive_run()
         parser = build_parser()
-        return run(parse_args_with_profile(parser, actual_argv))
+        return run(parse_args_with_prompts(parser, actual_argv))
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:
         return print_tool_error(exc)
     except (EOFError, KeyboardInterrupt):

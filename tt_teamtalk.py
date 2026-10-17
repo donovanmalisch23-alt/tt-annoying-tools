@@ -21,7 +21,7 @@ import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 
 TEAMTALK_SDK_DOWNLOAD = "https://bearware.dk/?page_id=419"
@@ -815,14 +815,245 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def stdin_is_interactive() -> bool:
+    """True when a human can answer a prompt (a terminal on stdin)."""
+    return bool(sys.stdin and sys.stdin.isatty())
+
+
+# --------------------------------------------------------------------------- #
+# Asking for settings the command line left out (terminal runs only)
+# --------------------------------------------------------------------------- #
+
+def _long_options(action: argparse.Action) -> list[str]:
+    return [option for option in action.option_strings if option.startswith("--")]
+
+
+def _settable_actions(parser: argparse.ArgumentParser) -> list[argparse.Action]:
+    """Every long-flag setting a tool exposes, in declaration order."""
+    return [
+        action
+        for action in parser._actions
+        if _long_options(action) and action.dest != "help"
+    ]
+
+
+def _actions_by_key(
+    parser: argparse.ArgumentParser,
+) -> dict[str, argparse.Action]:
+    """Map every long-flag spelling (including aliases) to its action."""
+    mapping: dict[str, argparse.Action] = {}
+    for action in _settable_actions(parser):
+        for option in _long_options(action):
+            mapping.setdefault(option.lstrip("-").lower().replace("-", "_"), action)
+    return mapping
+
+
+def _actions_by_dest(
+    actions: Iterable[argparse.Action],
+) -> dict[str, list[argparse.Action]]:
+    """Group the actions that share a destination (on/off flag pairs)."""
+    grouped: dict[str, list[argparse.Action]] = {}
+    for action in actions:
+        grouped.setdefault(action.dest, []).append(action)
+    return grouped
+
+
+def _mutually_exclusive_groups(
+    parser: argparse.ArgumentParser,
+) -> dict[argparse.Action, argparse.ActionGroup]:
+    """Map each grouped action to its mutually exclusive group."""
+    return {
+        action: group
+        for group in parser._mutually_exclusive_groups
+        for action in group._group_actions
+    }
+
+
+def _explicit_dests(argv: Sequence[str], key_map: dict[str, argparse.Action]) -> set[str]:
+    """Destinations the command line set directly."""
+    dests: set[str] = set()
+    for token in argv:
+        if token == "--":
+            break
+        if not token.startswith("--"):
+            continue
+        name = token.split("=", 1)[0]
+        action = key_map.get(name.lstrip("-").lower().replace("-", "_"))
+        if action is not None:
+            dests.add(action.dest)
+    return dests
+
+
+def _help_requested(argv: Sequence[str]) -> bool:
+    """True when argv asks for help; the questions would only be in the way."""
+    for token in argv:
+        if token == "--":
+            break
+        if token in {"-h", "--help"}:
+            return True
+    return False
+
+
+def _prompt_unset_setting(action: argparse.Action, key: str) -> Optional[str]:
+    """Ask for one unset setting; Enter (empty answer) keeps the default."""
+    if isinstance(action, argparse._StoreConstAction):
+        prompt = f"{key} [y/n] (Enter to keep default): "
+    elif action.choices is not None:
+        listed = "/".join(str(choice) for choice in action.choices)
+        prompt = f"{key} ({listed}) (Enter to keep default): "
+    elif isinstance(action.default, str):
+        shown = action.default if action.default else "blank"
+        prompt = f"{key} [{shown}] (Enter to keep default): "
+    elif isinstance(action.default, (int, float)) and not isinstance(
+        action.default, bool
+    ):
+        shown = f"{action.default:g}"
+        prompt = f"{key} [{shown}] (Enter to keep default): "
+    else:
+        prompt = f"{key} (Enter to skip): "
+    while True:
+        answer = input(prompt).strip()
+        if not answer:
+            return None
+        if isinstance(action, argparse._StoreConstAction):
+            lowered = answer.lower()
+            if lowered in {"y", "yes"}:
+                return "true"
+            if lowered in {"n", "no"}:
+                return "false"
+            print("Please answer y or n.")
+        elif action.choices is not None and answer not in action.choices:
+            listed = "/".join(str(choice) for choice in action.choices)
+            print(f"Please choose one of: {listed}.")
+        elif action.type is not None:
+            try:
+                action.type(answer)
+            except (ValueError, TypeError, argparse.ArgumentTypeError) as exc:
+                print(f"That value is not valid: {exc}")
+            else:
+                return answer
+        else:
+            return answer
+
+
+def _answer_token(
+    action: argparse.Action,
+    value: str,
+    dest_actions: dict[str, list[argparse.Action]],
+) -> Optional[str]:
+    """One argv token that sets the answered setting through the parser.
+
+    Values go in as ``--flag=value`` so a value starting with a dash
+    cannot be mistaken for another option, and booleans resolve to the
+    on/off flag that actually expresses the wanted polarity.
+    """
+    if isinstance(action, argparse._StoreConstAction):
+        wanted = value.strip().lower() in {"true", "yes", "on", "1"}
+        for candidate in dest_actions.get(action.dest, []):
+            if (
+                isinstance(candidate, argparse._StoreConstAction)
+                and bool(candidate.const) == wanted
+            ):
+                return _long_options(candidate)[0]
+        return None
+    return f"{_long_options(action)[0]}={value}"
+
+
+def prompt_unset_settings(
+    parser: argparse.ArgumentParser,
+    settled_dests: Iterable[str],
+) -> list[str]:
+    """Ask for every setting the command line left out, on a terminal.
+
+    Each question shows the tool's default and Enter keeps it, so the
+    walk is a row of Enters for anyone happy with the defaults.  A typed
+    answer is injected as ``--flag=value`` ahead of the real argv, so
+    explicit flags still win and the tool's own ``type``/``choices``
+    validation runs on every answer.
+    """
+    actions = _settable_actions(parser)
+    dest_actions = _actions_by_dest(actions)
+    groups = _mutually_exclusive_groups(parser)
+
+    settled = set(settled_dests)
+    # A mutually exclusive group with a settled member is done: asking its
+    # partner would only produce an argparse conflict error.
+    for dest in list(settled):
+        for action in dest_actions.get(dest, []):
+            group = groups.get(action)
+            if group is not None:
+                settled.update(member.dest for member in group._group_actions)
+
+    to_ask: list[argparse.Action] = []
+    seen_dests: set[str] = set()
+    for action in actions:
+        if action.dest in settled or action.dest in seen_dests:
+            continue
+        seen_dests.add(action.dest)
+        to_ask.append(action)
+    if not to_ask:
+        return []
+
+    print("Settings not set on the command line;")
+    print("press Enter to keep the shown default:")
+    tokens: list[str] = []
+    answered_groups: set[int] = set()
+    for action in to_ask:
+        key = _long_options(action)[0].lstrip("-").lower().replace("-", "_")
+        group = groups.get(action)
+        if group is not None and id(group) in answered_groups:
+            print(f"{key}: skipped, a mutually exclusive choice is already set.")
+            continue
+        value = _prompt_unset_setting(action, key)
+        if value is None:
+            continue
+        token = _answer_token(action, value, dest_actions)
+        if token is None:
+            continue
+        tokens.append(token)
+        if group is not None:
+            answered_groups.add(id(group))
+    return tokens
+
+
+def parse_args_with_prompts(
+    parser: argparse.ArgumentParser, argv: Sequence[str]
+) -> argparse.Namespace:
+    """``parser.parse_args``, asking on a terminal for everything unset.
+
+    Without a terminal (scripts, cron, tests) this is exactly
+    ``parser.parse_args(argv)``; nothing is asked and the defaults apply.
+    """
+    if _help_requested(argv) or not stdin_is_interactive():
+        return parser.parse_args(argv)
+    settled = _explicit_dests(argv, _actions_by_key(parser))
+    prompted = prompt_unset_settings(parser, settled)
+    return parser.parse_args(prompted + list(argv))
+
+
+def _prompt_missing_host() -> str:
+    """Ask for the missing server host, or refuse when nobody can answer.
+
+    A run with no ``--host`` and no ``TT_HOST`` used to stop dead; on a
+    terminal it now asks, defaulting to the interactive tools' own
+    localhost default.  Without a terminal (scripts, cron, tests) it
+    still refuses: silently guessing a server would be worse than the
+    explicit error.
+    """
+    if not stdin_is_interactive():
+        raise TeamTalkConfigurationError(
+            "--host is required (or set TT_HOST); refusing to guess a server"
+        )
+    print("No --host was given and TT_HOST is not set.")
+    return prompt_text("TeamTalk server host", "127.0.0.1")
+
+
 def config_from_args(args: argparse.Namespace) -> ConnectionConfig:
     """Create and validate a ``ConnectionConfig`` from argparse output."""
 
     host = (args.host or "").strip()
     if not host:
-        raise TeamTalkConfigurationError(
-            "--host is required (or set TT_HOST); refusing to guess a server"
-        )
+        host = _prompt_missing_host()
     if not 1 <= args.tcp_port <= 65535 or not 1 <= args.udp_port <= 65535:
         raise TeamTalkConfigurationError("TCP and UDP ports must be between 1 and 65535")
     if args.timeout <= 0:
@@ -888,7 +1119,41 @@ class TeamTalkSession:
         # two threads at once).  It drains events from the native queue and
         # routes them through this buffer so the bot's poll()/_wait_for() can
         # read them without racing the pump.
-        self._event_buffer: collections.deque = collections.deque()
+        # Events are split by concern so one hot path never has to scan
+        # unrelated traffic: command acknowledgements, text messages, and
+        # state updates each have their own bounded queue.
+        self._command_buffer: collections.deque = collections.deque()
+        self._text_buffer: collections.deque = collections.deque()
+        self._state_buffer: collections.deque = collections.deque()
+        self._command_event_ids = {
+            value
+            for value in (
+                sdk_event(self.sdk, "CLIENTEVENT_CON_SUCCESS"),
+                sdk_event(self.sdk, "CLIENTEVENT_CON_FAILED"),
+                sdk_event(self.sdk, "CLIENTEVENT_CON_LOST"),
+                sdk_event(self.sdk, "CLIENTEVENT_CON_CRYPT_ERROR"),
+                sdk_event(self.sdk, "CLIENTEVENT_CMD_PROCESSING"),
+                sdk_event(self.sdk, "CLIENTEVENT_CMD_ERROR"),
+                sdk_event(self.sdk, "CLIENTEVENT_CMD_SUCCESS"),
+                sdk_event(self.sdk, "CLIENTEVENT_CMD_MYSELF_LOGGEDIN"),
+                sdk_event(self.sdk, "CLIENTEVENT_CMD_MYSELF_LOGGEDOUT"),
+                sdk_event(self.sdk, "CLIENTEVENT_CMD_MYSELF_KICKED"),
+            )
+            if value is not None
+        }
+        self._text_event_id = sdk_event(self.sdk, "CLIENTEVENT_CMD_USER_TEXTMSG")
+        self._command_success_id = sdk_event(self.sdk, "CLIENTEVENT_CMD_SUCCESS")
+        self._command_error_id = sdk_event(self.sdk, "CLIENTEVENT_CMD_ERROR")
+        self._command_processing_id = sdk_event(self.sdk, "CLIENTEVENT_CMD_PROCESSING")
+        self._connection_failure_ids = {
+            value
+            for value in (
+                sdk_event(self.sdk, "CLIENTEVENT_CON_FAILED"),
+                sdk_event(self.sdk, "CLIENTEVENT_CON_LOST"),
+                sdk_event(self.sdk, "CLIENTEVENT_CON_CRYPT_ERROR"),
+            )
+            if value is not None
+        }
         self._event_cv = threading.Condition(threading.Lock())
         self._pump_stop = threading.Event()
         self._pump_thread: Optional[threading.Thread] = None
@@ -970,7 +1235,7 @@ class TeamTalkSession:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             # Events are drained by the background pump thread (the sole
             # getMessage consumer) and delivered through the internal buffer.
-            message = self._next_event(remaining_ms)
+            message = self._next_from_queue(self._command_buffer, remaining_ms)
             event = sdk_int(getattr(message, "nClientEvent", 0))
             source = sdk_int(getattr(message, "nSource", -1), -1)
             if event in expected and (command_id is None or source == command_id):
@@ -1424,16 +1689,30 @@ class TeamTalkSession:
         if not self.logged_in:
             raise TeamTalkConfigurationError("connect and log in before listing users")
         try:
-            users = self.client.getServerUsers()
+            # The server only sends a regular (non-admin) client user updates
+            # for channels it has joined, so getServerUsers() alone misses
+            # users sitting inside other channels. Union it with every
+            # visible channel's member list and deduplicate by user ID.
+            users: list[Any] = list(self.client.getServerUsers())
+            for channel in self.client.getServerChannels():
+                channel_id = sdk_int(getattr(channel, "nChannelID", -1), -1)
+                if channel_id >= 0:
+                    users.extend(self.client.getChannelUsers(channel_id))
             own_user_id = sdk_int(self.client.getMyUserID(), -1)
         except Exception as exc:
             raise TeamTalkError(f"could not retrieve TeamTalk users: {exc}") from exc
 
         result: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
         for user in users:
             user_id = sdk_int(getattr(user, "nUserID", -1), -1)
-            if user_id < 0 or (not include_self and user_id == own_user_id):
+            if (
+                user_id < 0
+                or user_id in seen_ids
+                or (not include_self and user_id == own_user_id)
+            ):
                 continue
+            seen_ids.add(user_id)
             channel_id = sdk_int(getattr(user, "nChannelID", -1), -1)
             try:
                 channel_path = sdk_text(self.client.getChannelPath(channel_id))
@@ -1507,7 +1786,9 @@ class TeamTalkSession:
         self._pump_stop.clear()
         # Drain any stale buffered events from a previous client lifetime.
         with self._event_cv:
-            self._event_buffer.clear()
+            self._command_buffer.clear()
+            self._text_buffer.clear()
+            self._state_buffer.clear()
         thread = threading.Thread(
             target=self._event_pump_loop, name="tt-event-pump", daemon=True
         )
@@ -1560,24 +1841,68 @@ class TeamTalkSession:
                 continue
             event = sdk_int(getattr(message, "nClientEvent", 0))
             if event:  # ignore CLIENTEVENT_NONE (0) padding from the wait
+                queue = self._event_queue(event)
                 with self._event_cv:
-                    self._event_buffer.append(message)
+                    queue.append(message)
                     self._event_cv.notify()
 
-    def _next_event(self, timeout_ms: int) -> Any:
-        """Pop one buffered event, waiting up to ``timeout_ms`` for one."""
+    def _event_queue(self, event: int) -> collections.deque:
+        """Classify an event into the queue its consumers care about."""
+
+        if event in self._command_event_ids:
+            return self._command_buffer
+        if self._text_event_id is not None and event == self._text_event_id:
+            return self._text_buffer
+        return self._state_buffer
+
+    def _next_from_queue(
+        self,
+        queue: collections.deque,
+        timeout_ms: int,
+    ) -> Any:
+        """Pop one event from ``queue``, waiting up to ``timeout_ms``."""
 
         deadline = time.monotonic() + max(0.0, timeout_ms) / 1000.0
         with self._event_cv:
-            while not self._event_buffer and time.monotonic() < deadline:
+            while not queue and time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 if not self._event_cv.wait(timeout=max(0.001, remaining)):
                     break
-            if self._event_buffer:
-                return self._event_buffer.popleft()
-        # No event: return a CLIENTEVENT_NONE placeholder the callers already
-        # treat as "no event" (they check nClientEvent != 0).
+            if queue:
+                return queue.popleft()
         return _NO_EVENT
+
+    def _next_event(self, timeout_ms: int) -> Any:
+        """Compatibility poll across every event queue.
+
+        Command acknowledgements are checked first because blocking SDK
+        operations depend on them, then text, then state.  Consumers that know
+        their event class should use the specialized methods below instead.
+        """
+
+        deadline = time.monotonic() + max(0.0, timeout_ms) / 1000.0
+        while time.monotonic() < deadline:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            for queue in (
+                self._command_buffer,
+                self._text_buffer,
+                self._state_buffer,
+            ):
+                message = self._next_from_queue(queue, 0)
+                if getattr(message, "nClientEvent", 0):
+                    return message
+            time.sleep(max(0.001, remaining_ms / 1000.0))
+        return _NO_EVENT
+
+    def receive_text(self, timeout_ms: int = 1000) -> Any:
+        """Pop one incoming text message without scanning command acks."""
+
+        return self._next_from_queue(self._text_buffer, timeout_ms)
+
+    def poll_state(self, timeout_ms: int = 1000) -> Any:
+        """Pop one roster/channel/state event without scanning other queues."""
+
+        return self._next_from_queue(self._state_buffer, timeout_ms)
 
     def poll(self, wait_ms: int = 1000) -> Any:
         return self._next_event(wait_ms)

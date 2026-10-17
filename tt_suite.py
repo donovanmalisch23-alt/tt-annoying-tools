@@ -35,14 +35,15 @@ from tt_teamtalk import (
     comma_int,
     config_dir,
     config_from_args,
+    parse_args_with_prompts,
     print_tool_error,
     prompt_connection_config,
     prompt_float,
     prompt_int,
     prompt_text,
     prompt_yes_no,
+    stdin_is_interactive,
 )
-from tt_profile import add_profile_argument, parse_args_with_profile
 
 
 # When frozen by PyInstaller, __file__ is inside a temp extraction dir, so
@@ -323,13 +324,90 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="confirm requested channel/private test actions",
     )
-    add_profile_argument(parser)
     return parser
+
+
+# A pass that ends by filling a value restarts the checks, because one fill
+# can create the need for another (answering "--bot-per-user needs a private
+# message" makes the next pass ask for its recipients).  Every fill strictly
+# adds a value that was missing, so the passes converge well before the cap.
+_MAX_PROMPT_PASSES = 10
+
+
+def _can_prompt() -> bool:
+    """True when a human can answer prompts (a terminal on stdin)."""
+    return stdin_is_interactive()
+
+
+def _prompt_test_message(question: str, label: str) -> str:
+    """Ask for a non-empty test message, repeating until it validates."""
+    while True:
+        value = prompt_text(question, None)
+        if not value:
+            print(f"Please enter a message for {label}.")
+            continue
+        try:
+            return validate_test_message(value, label)
+        except TeamTalkConfigurationError as exc:
+            print(str(exc))
+
+
+def _prompt_optional_test_message(question: str, label: str) -> Optional[str]:
+    """Ask for a test message; blank returns None (skip this message)."""
+    while True:
+        value = prompt_text(question, None)
+        if not value:
+            return None
+        try:
+            return validate_test_message(value, label)
+        except TeamTalkConfigurationError as exc:
+            print(str(exc))
+
+
+def _prompt_concurrent() -> bool:
+    """Offer to enable ``--concurrent``; the caller keeps the original error."""
+    return prompt_yes_no(
+        "Run as concurrent bots (one bot per concern, plus churn bots)?", False
+    )
+
+
+def _prompt_confirm(original_error: str) -> None:
+    """Ask for the missing ``--confirm``, or stop the run cleanly."""
+    if not _can_prompt():
+        raise TeamTalkConfigurationError(original_error)
+    print("--confirm was not given.")
+    if prompt_yes_no("Proceed with the requested test operations?", False):
+        return
+    print("Declined; nothing was run.")
+    raise SystemExit(0)
 
 
 def validate_args(
     args: argparse.Namespace,
 ) -> tuple[list[int], list[str], bool, bool]:
+    """Validate the settings, prompting on a terminal for any missing value.
+
+    The command line used to stop dead at the first missing companion
+    value — ``--private-message`` without recipients, a channel action
+    without a channel, ``--concurrent`` without an action, a missing
+    ``--confirm``.  On a terminal each is now asked for, exactly as the
+    interactive mode would, so a partial command line behaves as if the
+    missing values had been given.  Without a terminal (scripts, cron,
+    tests) every check raises the same error as before.
+    """
+    for _ in range(_MAX_PROMPT_PASSES):
+        result = _validate_once(args)
+        if result is not None:
+            return result
+    raise TeamTalkConfigurationError(
+        "could not complete the missing settings interactively"
+    )
+
+
+def _validate_once(
+    args: argparse.Namespace,
+) -> Optional[tuple[list[int], list[str], bool, bool]]:
+    """One validation pass; ``None`` means a value was filled, re-run me."""
     if args.channel_path and args.channel_path.strip().casefold() == "all":
         args.channel_path = None
         args.all_channels = True
@@ -371,9 +449,34 @@ def validate_args(
             args.private_message, "--private-message"
         )
         if not user_ids and not user_names and not all_users:
-            raise TeamTalkConfigurationError(
-                "--private-message requires --user, --user-id, or --all-users"
-            )
+            if not _can_prompt():
+                raise TeamTalkConfigurationError(
+                    "--private-message requires --user, --user-id, or --all-users"
+                )
+            print("--private-message needs recipients; none were given.")
+            if prompt_yes_no("Use all discovered online users?", False):
+                args.all_users = True
+            else:
+                while True:
+                    text = prompt_text(
+                        "Private message recipients (usernames, comma-separated; "
+                        "or all)",
+                        None,
+                    )
+                    if text and text.strip().casefold() == "all":
+                        args.all_users = True
+                        break
+                    try:
+                        if text:
+                            parse_user_names([text])
+                    except TeamTalkConfigurationError as exc:
+                        print(str(exc))
+                        continue
+                    if text:
+                        args.user = [text]
+                        break
+                    print("Please enter at least one username, or 'all'.")
+            return None
 
     channel_action = bool(
         args.channel_message is not None or args.join_leave_cycles > 0
@@ -381,36 +484,104 @@ def validate_args(
     if channel_action and not (
         all_channels or args.channel_id is not None or args.channel_path
     ):
-        raise TeamTalkConfigurationError(
-            "channel operations require --channel-id, --channel-path, or --all-channels"
-        )
+        if not _can_prompt():
+            raise TeamTalkConfigurationError(
+                "channel operations require --channel-id, --channel-path, "
+                "or --all-channels"
+            )
+        print("Channel operations need a target; none was given.")
+        if prompt_yes_no("Use all discovered channels?", False):
+            args.all_channels = True
+        else:
+            args.channel_path = prompt_text(
+                "Channel path for channel operations", "/"
+            )
+            args.channel_password = prompt_text(
+                "TeamTalk channel password", None, secret=True
+            )
+        return None
 
     if args.churn_bots < 0:
         raise TeamTalkConfigurationError("--churn-bots cannot be negative")
     if args.churn_cycles < 1:
         raise TeamTalkConfigurationError("--churn-cycles must be at least 1")
     if args.churn_bots > 0 and not args.concurrent:
+        if not _can_prompt():
+            raise TeamTalkConfigurationError(
+                "--churn-bots requires --concurrent (each churn bot opens its "
+                "own SDK connection)"
+            )
+        print("--churn-bots needs --concurrent; it was not given.")
+        if _prompt_concurrent():
+            args.concurrent = True
+            return None
         raise TeamTalkConfigurationError(
             "--churn-bots requires --concurrent (each churn bot opens its own "
             "SDK connection)"
         )
     if args.continuous_scan:
         if not args.concurrent:
+            if not _can_prompt():
+                raise TeamTalkConfigurationError(
+                    "--continuous-scan requires --concurrent (each spawned bot "
+                    "opens its own SDK connection)"
+                )
+            print("--continuous-scan needs --concurrent; it was not given.")
+            if _prompt_concurrent():
+                args.concurrent = True
+                return None
             raise TeamTalkConfigurationError(
                 "--continuous-scan requires --concurrent (each spawned bot "
                 "opens its own SDK connection)"
             )
         if not args.bot_per_channel and not args.bot_per_user:
-            raise TeamTalkConfigurationError(
-                "--continuous-scan requires --bot-per-channel and/or "
-                "--bot-per-user (it spawns those bots as it finds targets)"
+            if not _can_prompt():
+                raise TeamTalkConfigurationError(
+                    "--continuous-scan requires --bot-per-channel and/or "
+                    "--bot-per-user (it spawns those bots as it finds targets)"
+                )
+            print(
+                "--continuous-scan spawns bots as it finds targets; "
+                "none were enabled."
             )
+            args.bot_per_channel = prompt_yes_no(
+                "Spawn one bot per channel (own connection each)?", False
+            )
+            args.bot_per_user = prompt_yes_no(
+                "Spawn one bot per user for private messages "
+                "(own connection each)?",
+                False,
+            )
+            if not args.bot_per_channel and not args.bot_per_user:
+                raise TeamTalkConfigurationError(
+                    "--continuous-scan requires --bot-per-channel and/or "
+                    "--bot-per-user (it spawns those bots as it finds targets)"
+                )
+            return None
     if args.bot_per_channel and not args.concurrent:
+        if not _can_prompt():
+            raise TeamTalkConfigurationError(
+                "--bot-per-channel requires --concurrent (each channel bot "
+                "opens its own SDK connection)"
+            )
+        print("--bot-per-channel needs --concurrent; it was not given.")
+        if _prompt_concurrent():
+            args.concurrent = True
+            return None
         raise TeamTalkConfigurationError(
             "--bot-per-channel requires --concurrent (each channel bot opens "
             "its own SDK connection)"
         )
     if args.bot_per_user and not args.concurrent:
+        if not _can_prompt():
+            raise TeamTalkConfigurationError(
+                "--bot-per-user requires --concurrent (each user bot opens "
+                "its own SDK connection)"
+            )
+        print("--bot-per-user needs --concurrent; it was not given.")
+        if _prompt_concurrent():
+            args.concurrent = True
+            return None
         raise TeamTalkConfigurationError(
             "--bot-per-user requires --concurrent (each user bot opens its own "
             "SDK connection)"
@@ -418,15 +589,36 @@ def validate_args(
     if args.bot_per_channel and not args.continuous_scan and not (
         args.channel_message is not None or args.join_leave_cycles > 0
     ):
-        raise TeamTalkConfigurationError(
-            "--bot-per-channel requires a channel action (--channel-message or "
-            "--join-leave-cycles) — or --continuous-scan, where the bots join "
-            "and idle in their channels"
+        if not _can_prompt():
+            raise TeamTalkConfigurationError(
+                "--bot-per-channel requires a channel action (--channel-message "
+                "or --join-leave-cycles) — or --continuous-scan, where the bots "
+                "join and idle in their channels"
+            )
+        print(
+            "--bot-per-channel needs something for its bots to do; "
+            "nothing was configured."
         )
+        message = _prompt_optional_test_message(
+            "Channel test message (blank to skip)", "--channel-message"
+        )
+        if message is not None:
+            args.channel_message = message
+        else:
+            args.join_leave_cycles = prompt_int(
+                "Join/leave cycles per selected channel", 1, minimum=1
+            )
+        return None
     if args.bot_per_user and args.private_message is None:
-        raise TeamTalkConfigurationError(
-            "--bot-per-user requires --private-message"
+        if not _can_prompt():
+            raise TeamTalkConfigurationError(
+                "--bot-per-user requires --private-message"
+            )
+        print("--bot-per-user sends private messages; none was given.")
+        args.private_message = _prompt_test_message(
+            "Private test message", "--private-message"
         )
+        return None
     if args.concurrent:
         has_action = (
             args.private_message is not None
@@ -437,21 +629,40 @@ def validate_args(
             or (args.continuous_scan and args.bot_per_channel)
         )
         if not has_action:
-            raise TeamTalkConfigurationError(
-                "--concurrent requires --private-message, a channel action "
-                "(--channel-message or --join-leave-cycles), or --churn-bots"
+            if not _can_prompt():
+                raise TeamTalkConfigurationError(
+                    "--concurrent requires --private-message, a channel action "
+                    "(--channel-message or --join-leave-cycles), or --churn-bots"
+                )
+            print("--concurrent needs an action; none was configured.")
+            channel_message = _prompt_optional_test_message(
+                "Channel test message (blank to skip)", "--channel-message"
             )
+            if channel_message is not None:
+                args.channel_message = channel_message
+            private_message = _prompt_optional_test_message(
+                "Private test message (blank to skip)", "--private-message"
+            )
+            if private_message is not None:
+                args.private_message = private_message
+            if channel_message is None and private_message is None:
+                args.join_leave_cycles = prompt_int(
+                    "Join/leave cycles per selected channel", 1, minimum=1
+                )
+            return None
         if not args.dry_run and not args.confirm:
-            raise TeamTalkConfigurationError(
+            _prompt_confirm(
                 "--confirm is required for the concurrent bot run "
                 "(use --dry-run to preview the bot plan)"
             )
+            args.confirm = True
+            return None
 
     active_action = channel_action or args.private_message is not None
     if active_action and not args.dry_run and not args.confirm:
-        raise TeamTalkConfigurationError(
-            "--confirm is required for channel or private test actions"
-        )
+        _prompt_confirm("--confirm is required for channel or private test actions")
+        args.confirm = True
+        return None
     return user_ids, user_names, all_users, all_channels
 
 
@@ -1033,59 +1244,6 @@ def _drain_login_events(
     return False
 
 
-def _channel_roster(
-    session: TeamTalkSession,
-) -> dict[int, list[dict[str, Any]]]:
-    """Build a fallback roster from every visible channel."""
-
-    roster: dict[int, list[dict[str, Any]]] = {}
-    own_user_id = sdk_int(session.client.getMyUserID(), -1)
-    for channel in session.list_channels():
-        channel_id = int(channel["id"])
-        try:
-            members = session.client.getChannelUsers(channel_id)
-        except Exception:
-            continue
-        users: list[dict[str, Any]] = []
-        for member in members:
-            user_id = sdk_int(getattr(member, "nUserID", -1), -1)
-            if user_id < 0 or user_id == own_user_id:
-                continue
-            nickname = sdk_text(getattr(member, "szNickname", ""))
-            username = sdk_text(getattr(member, "szUsername", ""))
-            users.append(
-                {
-                    "id": user_id,
-                    "nickname": nickname,
-                    "username": username,
-                    "channel_id": channel_id,
-                    "channel_path": str(channel.get("path") or ""),
-                    "display_name": nickname or username or f"user {user_id}",
-                }
-            )
-        if users:
-            roster[channel_id] = sorted(
-                users, key=lambda item: (item["display_name"].casefold(), item["id"])
-            )
-    return roster
-
-
-def _merge_channel_roster(
-    users: Sequence[dict[str, Any]],
-    roster: dict[int, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    """Combine server and per-channel rosters without duplicate IDs."""
-
-    merged: dict[int, dict[str, Any]] = {int(user["id"]): user for user in users}
-    for channel_users in roster.values():
-        for user in channel_users:
-            merged.setdefault(int(user["id"]), user)
-    return sorted(
-        merged.values(),
-        key=lambda item: (str(item["display_name"]).casefold(), int(item["id"])),
-    )
-
-
 def _user_bot(
     base_config: Any,
     targets: Sequence[tuple[str, str]],
@@ -1150,10 +1308,9 @@ def _user_bot(
                     return
                 continue
             try:
-                users = _merge_channel_roster(
-                    session.list_users(include_self=False),
-                    _channel_roster(session),
-                )
+                # list_users() itself unions the per-channel rosters, so
+                # users sitting inside channels are discovered too.
+                users = session.list_users(include_self=False)
             except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
                 print(f"[user-bot] discovery interrupted: {exc}")
                 if not session.check_and_reconnect():
@@ -1511,10 +1668,7 @@ def _run_continuous_scan(config: Any, args: argparse.Namespace) -> int:
             while time.monotonic() < deadline:
                 users = [
                     user
-                    for user in _merge_channel_roster(
-                        session.list_users(include_self=False),
-                        _channel_roster(session),
-                    )
+                    for user in session.list_users(include_self=False)
                     if not _is_own_bot(user, config)
                 ]
                 if users:
@@ -1553,10 +1707,7 @@ def _run_continuous_scan(config: Any, args: argparse.Namespace) -> int:
                     continue
                 try:
                     channels = session.list_channels()
-                    users = _merge_channel_roster(
-                        session.list_users(include_self=False),
-                        _channel_roster(session),
-                    )
+                    users = session.list_users(include_self=False)
                 except (TeamTalkError, TeamTalkConfigurationError, OSError) as exc:
                     print(f"[scanner] discovery interrupted: {exc}")
                     if not session.check_and_reconnect():
@@ -2123,7 +2274,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not actual_argv:
             return interactive_run()
         parser = build_parser()
-        args = parse_args_with_profile(parser, actual_argv)
+        args = parse_args_with_prompts(parser, actual_argv)
         validate_args(args)
         return run(args)
     except (TeamTalkConfigurationError, TeamTalkError, OSError) as exc:

@@ -288,6 +288,30 @@ class TestListing:
         users = session.list_users(include_self=True)
         assert [u["id"] for u in users] == [100]
 
+    def test_list_users_includes_users_inside_channels(self, session_pair):
+        def configure(client):
+            client.channels[5] = "/Beta"
+            # Only visible to the server-wide roster; the channel member
+            # list is the only place the in-channel user shows up.
+            client.users = [{"id": 7, "nickname": "root", "channel_id": 1}]
+            client.channel_users[5] = [{"id": 12, "nickname": "chan"}]
+
+        session, _client = session_pair(configure)
+        session.open()
+        users = session.list_users()
+        assert [u["id"] for u in users] == [12, 7]  # sorted by display name
+        assert users[0]["channel_id"] == 5
+
+    def test_list_users_dedupes_users_found_in_roster_and_channel(self, session_pair):
+        def configure(client):
+            client.channels[5] = "/Beta"
+            client.users = [{"id": 9, "nickname": "dup", "channel_id": 5}]
+            client.channel_users[5] = [{"id": 9, "nickname": "dup"}]
+
+        session, _client = session_pair(configure)
+        session.open()
+        assert [u["id"] for u in session.list_users()] == [9]
+
 
 class TestWaitForAndFailures:
     def test_wait_timeout_raises(self, session_pair):
@@ -413,3 +437,113 @@ class TestEventBuffer:
         client.inject_event(FakeTTMessage(FakeClientEvent.CLIENTEVENT_CMD_SUCCESS, nSource=1))
         with pytest.raises(TeamTalkError, match="timed out"):
             session._wait_for({FakeClientEvent.CLIENTEVENT_CMD_SUCCESS}, "other", 9999)
+
+    def test_receive_text_is_isolated_from_command_events(self, session_pair):
+        session, client = session_pair()
+        session.open()
+        client.inject_event(
+            FakeTTMessage(FakeClientEvent.CLIENTEVENT_CMD_SUCCESS, nSource=77)
+        )
+        client.inject_event(
+            FakeTTMessage(
+                FakeClientEvent.CLIENTEVENT_CMD_USER_TEXTMSG,
+                textmessage=make_text_message("hello", msg_type=2),
+            )
+        )
+
+        deadline = tt_teamtalk.time.monotonic() + 2.0
+        seen = None
+        while tt_teamtalk.time.monotonic() < deadline:
+            message = session.receive_text(50)
+            if getattr(message, "nClientEvent", 0):
+                seen = message
+                break
+        assert seen is not None
+        assert seen.nClientEvent == FakeClientEvent.CLIENTEVENT_CMD_USER_TEXTMSG
+        assert seen.textmessage.szMessage == "hello"
+
+        # The command acknowledgement is still available for the blocking
+        # command path; the text receive did not consume or discard it.
+        command = session._wait_for(
+            {FakeClientEvent.CLIENTEVENT_CMD_SUCCESS}, "command", 77
+        )
+        assert command.nClientEvent == FakeClientEvent.CLIENTEVENT_CMD_SUCCESS
+
+    def test_wait_for_leaves_text_events_available(self, session_pair):
+        session, client = session_pair()
+        session.open()
+        client.inject_event(
+            FakeTTMessage(FakeClientEvent.CLIENTEVENT_CMD_SUCCESS, nSource=9)
+        )
+        client.inject_event(
+            FakeTTMessage(
+                FakeClientEvent.CLIENTEVENT_CMD_USER_TEXTMSG,
+                textmessage=make_text_message("hi", msg_type=2),
+            )
+        )
+
+        command = session._wait_for(
+            {FakeClientEvent.CLIENTEVENT_CMD_SUCCESS}, "command", 9
+        )
+        assert command.nClientEvent == FakeClientEvent.CLIENTEVENT_CMD_SUCCESS
+
+        deadline = tt_teamtalk.time.monotonic() + 2.0
+        seen = None
+        while tt_teamtalk.time.monotonic() < deadline:
+            message = session.receive_text(50)
+            if getattr(message, "nClientEvent", 0):
+                seen = message
+                break
+        assert seen is not None
+        assert seen.nClientEvent == FakeClientEvent.CLIENTEVENT_CMD_USER_TEXTMSG
+        assert seen.textmessage.szMessage == "hi"
+
+    def test_state_events_are_isolated_from_command_and_text(self, session_pair):
+        session, client = session_pair()
+        session.open()
+        client.inject_event(
+            FakeTTMessage(FakeClientEvent.CLIENTEVENT_CMD_USER_LOGGEDIN)
+        )
+
+        deadline = tt_teamtalk.time.monotonic() + 2.0
+        seen = None
+        while tt_teamtalk.time.monotonic() < deadline:
+            message = session.poll_state(50)
+            if getattr(message, "nClientEvent", 0):
+                seen = message
+                break
+        assert seen is not None
+        assert seen.nClientEvent == FakeClientEvent.CLIENTEVENT_CMD_USER_LOGGEDIN
+
+    def test_poll_prefers_command_before_text(self, session_pair):
+        session, client = session_pair()
+        session.open()
+        client.inject_event(
+            FakeTTMessage(FakeClientEvent.CLIENTEVENT_CMD_SUCCESS, nSource=1)
+        )
+        client.inject_event(
+            FakeTTMessage(
+                FakeClientEvent.CLIENTEVENT_CMD_USER_TEXTMSG,
+                textmessage=make_text_message("hi", msg_type=2),
+            )
+        )
+
+        deadline = tt_teamtalk.time.monotonic() + 2.0
+        first = None
+        while tt_teamtalk.time.monotonic() < deadline:
+            message = session.poll(50)
+            if getattr(message, "nClientEvent", 0):
+                first = message
+                break
+        assert first is not None
+        assert first.nClientEvent == FakeClientEvent.CLIENTEVENT_CMD_SUCCESS
+
+        deadline = tt_teamtalk.time.monotonic() + 2.0
+        second = None
+        while tt_teamtalk.time.monotonic() < deadline:
+            message = session.poll(50)
+            if getattr(message, "nClientEvent", 0):
+                second = message
+                break
+        assert second is not None
+        assert second.nClientEvent == FakeClientEvent.CLIENTEVENT_CMD_USER_TEXTMSG
