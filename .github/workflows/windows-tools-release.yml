@@ -55,7 +55,9 @@ jobs:
           root="$PWD/tt5sdk_v${TT_SDK_VERSION}_win64"
           test -f "$root/Library/TeamTalkPy/TeamTalk5.py"
           test -f "$root/Library/TeamTalk_DLL/TeamTalk5.dll"
-          echo "TT5SDK_ROOT=$root" >> "$GITHUB_ENV"
+          # PyInstaller is a Windows-native process: hand it a Windows path,
+          # not Git Bash's POSIX spelling of it.
+          echo "TT5SDK_ROOT=$(cygpath -m "$root")" >> "$GITHUB_ENV"
 
       - name: Build the tools
         shell: bash
