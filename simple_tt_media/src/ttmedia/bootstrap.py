@@ -1,23 +1,18 @@
 """Download the external tools the bot needs, into the project's tools/ folder.
 
 Run by Setup (``python -m ttmedia.bootstrap``). On Windows it fetches a static
-ffmpeg build and the Deno JS runtime (needed by yt-dlp for YouTube). ffmpeg and
-Deno are downloaded **in parallel**, each with a short socket timeout and a
-hard overall deadline, so setup can never hang on a slow or dead mirror — a
-failed download is reported and setup continues (tools already on PATH still
-work). Existing copies are left untouched.
+ffmpeg build and the Deno JS runtime (needed by yt-dlp for YouTube). Existing
+copies are left alone, and a failure is reported but never fatal — the bot can
+still use tools already on PATH.
 """
 
 from __future__ import annotations
 
 import io
 import sys
-import threading
-import time
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Optional
 
 from .sdk import project_root
 from .tools import find_deno, find_ffmpeg
@@ -28,9 +23,6 @@ FFMPEG_WIN_FALLBACK = ("https://github.com/BtbN/FFmpeg-Builds/releases/download/
 DENO_WIN = ("https://github.com/denoland/deno/releases/latest/download/"
             "deno-x86_64-pc-windows-msvc.zip")
 
-SOCKET_TIMEOUT = 30         # seconds per read with no data -> give up
-OVERALL_DEADLINE = 300      # seconds hard cap for one download
-
 
 def _tools_dir() -> Path:
     d = project_root() / "tools"
@@ -38,20 +30,10 @@ def _tools_dir() -> Path:
     return d
 
 
-def _download(url: str) -> bytes:
-    """Stream a URL to memory with a per-read timeout and a hard deadline."""
+def _download(url: str, timeout: int = 180) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "simple-tt-media-setup"})
-    deadline = time.monotonic() + OVERALL_DEADLINE
-    buf = io.BytesIO()
-    with urllib.request.urlopen(req, timeout=SOCKET_TIMEOUT) as resp:  # noqa: S310
-        while True:
-            if time.monotonic() > deadline:
-                raise TimeoutError("download exceeded the time limit")
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            buf.write(chunk)
-    return buf.getvalue()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        return resp.read()
 
 
 def _extract_member(data: bytes, endswith: str, dest: Path) -> bool:
@@ -65,60 +47,50 @@ def _extract_member(data: bytes, endswith: str, dest: Path) -> bool:
     return False
 
 
-def _install_ffmpeg(result: dict) -> None:
+def install_ffmpeg() -> bool:
     if find_ffmpeg():
         print("[ok] ffmpeg is already available.")
-        result["ffmpeg"] = True
-        return
+        return True
     if sys.platform != "win32":
-        print("[!!] Install ffmpeg with your package manager (e.g. apt install ffmpeg).")
-        return
+        print("[!!] Please install ffmpeg with your package manager.")
+        return False
     dest = _tools_dir() / "ffmpeg" / "ffmpeg.exe"
     for url in (FFMPEG_WIN, FFMPEG_WIN_FALLBACK):
         try:
             print(f"Downloading ffmpeg from {url.split('/')[2]} ...")
             if _extract_member(_download(url), "bin/ffmpeg.exe", dest):
-                print(f"[ok] Installed ffmpeg.")
-                result["ffmpeg"] = True
-                return
+                print(f"[ok] Installed ffmpeg -> {dest}")
+                return True
         except Exception as exc:  # noqa: BLE001
             print(f"[..] {url.split('/')[2]} failed: {exc}")
-    print("[!!] Could not download ffmpeg automatically — see docs/TROUBLESHOOTING.md.")
+    print("[!!] Could not download ffmpeg automatically. See docs/SETUP.md.")
+    return False
 
 
-def _install_deno(result: dict) -> None:
+def install_deno() -> bool:
     if find_deno():
-        print("[ok] A JavaScript runtime for YouTube is already available.")
-        result["deno"] = True
-        return
+        print("[ok] A JavaScript runtime (deno/node) is already available.")
+        return True
     if sys.platform != "win32":
         print("[!!] Install deno (https://deno.land) for YouTube support.")
-        return
+        return False
     dest = _tools_dir() / "deno" / "deno.exe"
     try:
         print("Downloading deno (needed for YouTube) ...")
         if _extract_member(_download(DENO_WIN), "deno.exe", dest):
-            print("[ok] Installed deno.")
-            result["deno"] = True
-            return
+            print(f"[ok] Installed deno -> {dest}")
+            return True
     except Exception as exc:  # noqa: BLE001
         print(f"[!!] Could not download deno: {exc}")
+    return False
 
 
 def main() -> int:
     print("Installing helper tools into:", _tools_dir())
-    result: dict = {}
-    threads = [
-        threading.Thread(target=_install_ffmpeg, args=(result,)),
-        threading.Thread(target=_install_deno, args=(result,)),
-    ]
-    for t in threads:
-        t.start()
-    # Join with a generous cap so a wedged thread can never block setup forever.
-    for t in threads:
-        t.join(timeout=OVERALL_DEADLINE + 30)
-    # ffmpeg is required for any playback; deno is only needed for YouTube.
-    return 0 if result.get("ffmpeg") else 1
+    ok_ff = install_ffmpeg()
+    install_deno()  # YouTube-only; not fatal for other services
+    # ffmpeg is required for any playback; signal failure if it's missing.
+    return 0 if ok_ff else 1
 
 
 if __name__ == "__main__":

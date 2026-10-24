@@ -39,8 +39,7 @@ class ServerConfig:
 
 @dataclass
 class BotConfig:
-    # Admin usernames (TeamTalk account names, which the server authenticates —
-    # unlike nicknames, which anyone can spoof). Server administrators are
+    # Admin usernames (TeamTalk account names). Server administrators are
     # always treated as admins too. Admin-only commands are refused otherwise.
     admins: List[str] = field(default_factory=list)
     # Prefix required for commands typed in a *channel*. Private messages are
@@ -49,25 +48,17 @@ class BotConfig:
     reconnect_seconds: int = 5
     # Announce the current track in the channel as it starts.
     announce_now_playing: bool = True
-    # Anti-abuse: a user may run at most this many commands per 10 seconds, and
-    # this many command handlers run at once across everyone (extra ones queue).
-    rate_limit_per_10s: int = 8
-    command_workers: int = 6
-    # Maximum tracks one user may hold in the queue at once (0 = unlimited).
-    max_user_queue: int = 100
 
 
 @dataclass
 class AudioConfig:
-    sample_rate: int = 48000      # 48 kHz matches TeamTalk's Opus codec
+    sample_rate: int = 48000
     channels: int = 2
     frame_ms: int = 20            # PCM frame size fed to the SDK
-    lead_ms: int = 300            # how far ahead of real time we send (stop latency)
-    buffer_ms: int = 2500         # in-process decode buffer that absorbs jitter
+    lead_ms: int = 350            # how far ahead of real time we buffer
     default_volume: int = 100     # percent
     max_volume: int = 200         # percent ceiling users may set
     max_track_seconds: int = 0    # 0 = unlimited; else refuse longer tracks
-    network_timeout: int = 15     # seconds before ffmpeg gives up on a stall
 
 
 @dataclass

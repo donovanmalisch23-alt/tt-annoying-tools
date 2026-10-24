@@ -8,16 +8,12 @@ name always gets an explicit error reply pointing at ``h``.
 
 from __future__ import annotations
 
-import queue
 import threading
-import time
-from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Callable, Deque, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ..errors import CommandError, PermissionDenied, UnknownCommand
 from ..log import get_logger
-from ..models import clean_text
 
 log = get_logger(__name__)
 
@@ -61,41 +57,9 @@ class Dispatcher:
         self.lock_manager = lock_manager
         self._commands: Dict[str, Command] = {}
         self._by_name: Dict[str, Command] = {}
-        # Per-user transient state (last search results for `pick`).
+        # Per-user transient state (last search results for `select`).
         self._results: Dict[int, List] = {}
         self._results_lock = threading.Lock()
-
-        # Anti-abuse: a fixed pool of daemon workers (so a flood can't spawn
-        # unbounded threads) fed by a bounded queue, plus a per-user rate limit.
-        workers = max(1, int(getattr(cfg.bot, "command_workers", 6)))
-        self._rate = max(1, int(getattr(cfg.bot, "rate_limit_per_10s", 8)))
-        self._work: "queue.Queue" = queue.Queue(maxsize=256)
-        self._hits: Dict[int, Deque[float]] = defaultdict(deque)
-        self._hits_lock = threading.Lock()
-        for i in range(workers):
-            threading.Thread(target=self._worker, daemon=True,
-                             name=f"cmd-worker-{i}").start()
-
-    def _worker(self) -> None:
-        while True:
-            ctx, name = self._work.get()
-            try:
-                self._run(ctx, name)
-            except Exception:  # noqa: BLE001 - a worker must never die
-                log.exception("command worker error")
-            finally:
-                self._work.task_done()
-
-    def _rate_ok(self, user_id: int) -> bool:
-        now = time.monotonic()
-        with self._hits_lock:
-            hits = self._hits[user_id]
-            while hits and now - hits[0] > 10.0:
-                hits.popleft()
-            if len(hits) >= self._rate:
-                return False
-            hits.append(now)
-            return True
 
     # ---- registration ---------------------------------------------------
 
@@ -128,10 +92,9 @@ class Dispatcher:
     def handle(self, *, text: str, requester: str, user_id: int,
                is_admin: bool, is_private: bool,
                reply: Callable[[str], None]) -> None:
-        text = (text or "").strip()
+        text = text.strip()
         if not text:
             return
-        requester = clean_text(requester, 64) or f"user{user_id}"
         lm = self.lock_manager
         # A private message from someone we asked for a password is the
         # password, not a command — capture it before any parsing.
@@ -147,19 +110,13 @@ class Dispatcher:
             reply("The bot is locked. Send 'lock' and the unlock password "
                   "to use it again.")
             return
-        # Rate-limit everyone equally to stop command floods.
-        if not self._rate_ok(user_id):
-            reply("You're sending commands too fast — please wait a moment.")
-            return
         ctx = CommandContext(
             dispatcher=self, player=self.player, sources=self.sources,
             client=self.client, cfg=self.cfg, requester=requester,
             user_id=user_id, is_admin=is_admin, is_private=is_private,
             reply=reply, arg=arg.strip())
-        try:
-            self._work.put_nowait((ctx, name))
-        except queue.Full:
-            reply("The bot is busy right now — please try again in a moment.")
+        threading.Thread(target=self._run, args=(ctx, name), daemon=True,
+                         name=f"cmd-{name}").start()
 
     def _run(self, ctx: CommandContext, name: str) -> None:
         try:

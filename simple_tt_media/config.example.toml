@@ -14,28 +14,23 @@ username = "mediabot"
 password = ""
 nickname = "MediaBot"
 status_message = "Send me a private message with 'h' for help"
-channel = "/"
+channel = "/Music"
 channel_password = ""
 
 [bot]
-admins = ["your_teamtalk_username"]
+admins = ["youradminname"]
 channel_prefix = ""
 reconnect_seconds = 5
 announce_now_playing = true
-rate_limit_per_10s = 8
-command_workers = 6
-max_user_queue = 100
 
 [audio]
 sample_rate = 48000
 channels = 2
 frame_ms = 20
-lead_ms = 300
-buffer_ms = 2500
+lead_ms = 350
 default_volume = 100
 max_volume = 200
 max_track_seconds = 0
-network_timeout = 15
 
 [sources]
 youtube = true

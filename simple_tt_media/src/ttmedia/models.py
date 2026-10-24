@@ -2,25 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
-
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def clean_text(text: str, max_len: int = 200) -> str:
-    """Strip control characters (incl. newlines) and clamp length.
-
-    Used on anything that originates from a user or an external service before
-    it goes into a chat message, so a crafted nickname or track title can't
-    inject extra lines or spoof the bot's own announcements.
-    """
-    if not text:
-        return ""
-    text = _CONTROL.sub(" ", str(text)).strip()
-    return text[:max_len] + "…" if len(text) > max_len else text
 
 
 @dataclass
@@ -49,9 +33,8 @@ class Track:
     retries: int = 0                       # re-resolve attempts after errors
 
     def label(self) -> str:
-        who = clean_text(self.artist, 100)
-        title = clean_text(self.title, 150) or "Unknown"
-        name = f"{who} - {title}" if who else title
+        who = self.artist.strip()
+        name = f"{who} - {self.title}" if who else self.title
         if self.duration:
             name += f" [{fmt_duration(self.duration)}]"
         return name
