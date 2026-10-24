@@ -50,9 +50,13 @@ class YtDlpRunner:
         opts = {
             "quiet": True,
             "no_warnings": True,
-            "format": "bestaudio/best",
+            # Prefer the highest-quality audio-only stream, Opus first (what
+            # TeamTalk uses), then AAC, then anything.
+            "format": "bestaudio[acodec=opus]/bestaudio[acodec^=mp4a]/bestaudio/best",
             "noplaylist": True,
             "socket_timeout": self._timeout,
+            "retries": 2,              # bounded so a bad network never hangs setup/search
+            "extractor_retries": 1,
             "skip_download": True,
             "noprogress": True,
             "cachedir": False,  # avoid a corruptible on-disk cache (cf. TTMediaBot #120)

@@ -69,6 +69,11 @@ class Cfg:
         max_volume = 200
         max_track_seconds = 0
 
+    class bot:
+        command_workers = 4
+        rate_limit_per_10s = 1000
+        max_user_queue = 0
+
 
 def run(dispatcher, text, user_id=5, is_admin=False):
     out = []
@@ -106,12 +111,19 @@ def test_help_for_one_command():
     assert out and "Usage:" in out[0]
 
 
-def test_search_then_select_by_number():
+def test_search_then_pick_by_number():
     d, player, *_ = make()
-    run(d, "s daft punk")
+    run(d, "search daft punk")
     out = run(d, "p 2")       # bare number plays result #2
     assert player.current is not None
     assert "#2" in player.current.title
+
+
+def test_pick_command_alias():
+    d, player, *_ = make()
+    run(d, "find daft punk")
+    run(d, "pick 1")
+    assert player.current is not None and "#1" in player.current.title
 
 
 def test_admin_only_blocked():
@@ -141,5 +153,16 @@ def test_service_switch_and_unknown():
 
 def test_volume_usage_error():
     d, *_ = make()
-    out = run(d, "v loud")
+    out = run(d, "vol loud")
     assert out and "Usage" in out[0]
+
+
+def test_rate_limit_blocks_floods():
+    player, sources, client = FakePlayer(), FakeSources(), FakeClient()
+
+    class RLCfg(Cfg):
+        class bot(Cfg.bot):
+            rate_limit_per_10s = 3
+    d = build_dispatcher(player, sources, client, RLCfg())
+    outs = [run(d, "about", user_id=99) for _ in range(5)]
+    assert any("too fast" in (o[0].lower() if o else "") for o in outs)
