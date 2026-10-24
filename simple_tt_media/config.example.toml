@@ -28,6 +28,11 @@ reconnect_seconds = 5
 [playback]
 announce_now_playing = true
 max_queue = 200
+default_volume = 100          # percent (100 = normal)
+loop = "off"                  # off | track | queue
+shuffle = false
+autoplay = false              # keep playing related tracks when the queue empties
+playlists_file = "playlists.json"
 
 [sources]
 youtube_enabled = true

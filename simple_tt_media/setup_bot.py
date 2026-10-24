@@ -113,6 +113,19 @@ def configure_bot() -> BotConfig:
     return b
 
 
+def configure_playback() -> PlaybackConfig:
+    header("Playback preferences")
+    pb = PlaybackConfig()
+    pb.default_volume = ask_int("Default volume (percent)", pb.default_volume)
+    loop = ask("Loop mode (off/track/queue)", pb.loop).lower()
+    pb.loop = loop if loop in ("off", "track", "queue") else "off"
+    pb.shuffle = ask_bool("Shuffle by default?", False)
+    pb.autoplay = ask_bool(
+        "Autoplay related tracks when the queue empties?", False)
+    pb.announce_now_playing = ask_bool("Announce 'Now playing' in channel?", True)
+    return pb
+
+
 def configure_sources() -> SourcesConfig:
     header("Streaming services")
     src = SourcesConfig()
@@ -205,7 +218,7 @@ def main() -> int:
         server=configure_server(),
         bot=configure_bot(),
         sources=configure_sources(),
-        playback=PlaybackConfig(),
+        playback=configure_playback(),
     )
     check_environment(cfg.sources)
 

@@ -25,12 +25,15 @@ import threading
 import time
 from typing import Callable, Optional
 
+import threading as _threading
+
 from .commands import CommandHandler
 from .config import Config
 from .log import get_logger
-from .player import MediaPlayer
+from .player import LoopMode, MediaPlayer
 from .sdk import load_sdk
 from .sources import SourceRegistry
+from .storage import PlaylistStore
 
 log = get_logger(__name__)
 
@@ -50,8 +53,15 @@ class MediaBot:
             announce=self._announce,
             max_queue=cfg.playback.max_queue,
             announce_now_playing=cfg.playback.announce_now_playing,
+            default_volume=cfg.playback.default_volume,
+            loop=LoopMode(cfg.playback.loop),
+            shuffle=cfg.playback.shuffle,
+            autoplay=cfg.playback.autoplay,
+            autoplay_fn=self._autoplay,
         )
-        self._commands = CommandHandler(cfg, self._player, self._registry)
+        self._playlists = PlaylistStore(cfg.playback.playlists_file)
+        self._commands = CommandHandler(
+            cfg, self._player, self._registry, self._playlists)
         self._my_user_id = 0
         self._running = False
         self._connected = threading.Event()
@@ -87,24 +97,71 @@ class MediaBot:
 
     # ---- Streamer protocol (used by the player) ------------------------
 
-    def stream(self, url: str) -> bool:
+    def _video_codec(self):
         tt = self._tt_mod
         codec = tt.VideoCodec()
         codec.nCodec = tt.Codec.NO_CODEC
+        return codec
+
+    def _playback(self, offset_ms, paused: bool, gain: int):
+        """Build a MediaFilePlayback with gain applied via the preprocessor."""
+        tt = self._tt_mod
+        pb = tt.MediaFilePlayback()
+        pb.uOffsetMSec = (tt.TT_MEDIAPLAYBACK_OFFSET_IGNORE
+                          if offset_ms is None else int(offset_ms))
+        pb.bPaused = bool(paused)
+        ap = tt.AudioPreprocessor()
+        ap.nPreprocessor = tt.AudioPreprocessorType.TEAMTALK_AUDIOPREPROCESSOR
+        ap.ttpreprocessor.nGainLevel = int(gain)
+        ap.ttpreprocessor.bMuteLeftSpeaker = False
+        ap.ttpreprocessor.bMuteRightSpeaker = False
+        pb.audioPreprocessor = ap
+        return pb
+
+    def stream(self, url: str, gain: int) -> bool:
+        tt = self._tt_mod
+        pb = self._playback(0, False, gain)
         try:
-            ok = self._client.startStreamingMediaFileToChannel(tt.ttstr(url), codec)
+            ok = tt._StartStreamingMediaFileToChannelEx(
+                self._client._tt, tt.ttstr(url), pb, self._video_codec())
         except Exception as exc:  # noqa: BLE001
-            log.warning("startStreamingMediaFileToChannel failed: %s", exc)
+            log.warning("start streaming failed: %s", exc)
             return False
         if not ok:
             log.warning("Server refused media stream for %s", url)
         return bool(ok)
+
+    def update(self, offset_ms, paused: bool, gain: int) -> bool:
+        tt = self._tt_mod
+        pb = self._playback(offset_ms, paused, gain)
+        try:
+            return bool(tt._UpdateStreamingMediaFileToChannel(
+                self._client._tt, pb, self._video_codec()))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("update streaming failed: %s", exc)
+            return False
 
     def stop(self) -> None:  # noqa: F811 - part of Streamer protocol
         try:
             self._client.stopStreamingMediaFileToChannel()
         except Exception as exc:  # noqa: BLE001
             log.debug("stopStreamingMediaFileToChannel: %s", exc)
+
+    # ---- autoplay (runs off the event loop) ----------------------------
+
+    def _autoplay(self, seed) -> None:
+        def worker() -> None:
+            try:
+                tracks = self._registry.related(
+                    seed, limit=3, exclude=self._player.recent_urls())
+                if tracks:
+                    self._player.enqueue(tracks)
+                else:
+                    self._player.clear_autoplay_pending()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("autoplay worker failed: %s", exc)
+                self._player.clear_autoplay_pending()
+        _threading.Thread(target=worker, daemon=True, name="autoplay").start()
 
     # ---- connection sequence -------------------------------------------
 

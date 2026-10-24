@@ -44,6 +44,21 @@ class SourceRegistry:
     def enabled_names(self) -> list[str]:
         return [s.name for s in self._sources]
 
+    @property
+    def audio_provider(self) -> Source | None:
+        return self._audio_provider
+
+    def related(self, track: Track, limit: int = 3, exclude=None) -> list:
+        """Related tracks for autoplay, via the audio provider (if capable)."""
+        provider = self._audio_provider
+        if provider is None or not hasattr(provider, "related"):
+            return []
+        try:
+            return provider.related(track, limit=limit, exclude=exclude)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("related() failed: %s", exc)
+            return []
+
     def resolve(self, query: str, requested_by: str = "") -> ResolveResult:
         query = query.strip()
         if not query:

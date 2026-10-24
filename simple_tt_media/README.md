@@ -27,8 +27,10 @@ music from YouTube, Spotify, or Apple Music with plain chat commands.
   - **Apple Music** — song / album links (metadata, no account needed).
   - **Local files & direct URLs** — anything ffmpeg can open, including
     internet-radio streams.
-- A queue with now-playing announcements, skip, stop, and clear.
-- Optional per-command permissions (operators).
+- A full queue with now-playing announcements: skip, pause/resume, seek,
+  volume, loop (track/queue), shuffle, and autoplay of related tracks.
+- Saved, named playlists that re-resolve fresh audio when loaded.
+- Optional operator permissions: anyone can queue, controls can be locked down.
 
 ### An honest note on Spotify & Apple Music
 
@@ -90,18 +92,39 @@ edit it.
 All commands are typed in the bot's channel (or as a private message to it)
 and start with the prefix (default `!`).
 
+Anyone may search and queue; the playback **controls** are operator-gated
+(when operators are configured — otherwise everyone can use everything).
+
+**Open to everyone**
+
 | Command | Aliases | What it does |
 |---|---|---|
 | `!play <link or search>` | `!p` | Queue a track/playlist, or start it if idle |
-| `!skip` | `!s`, `!next` | Skip the current track |
 | `!queue` | `!q` | Show what's playing and what's next |
 | `!nowplaying` | `!np` | Show the current track |
-| `!stop` | | Stop playback and clear the queue *(operator)* |
-| `!clear` | | Clear the queue, keep playing *(operator)* |
-| `!sources` | | List enabled services |
+| `!playlists` | | List saved playlists |
+| `!sources` | | List enabled services and current modes |
 | `!help` | `!h` | Show the command list |
 
-If no operators are configured, everyone may use every command.
+**Controls (operator-gated)**
+
+| Command | What it does |
+|---|---|
+| `!skip` (`!s`, `!next`) | Skip the current track |
+| `!pause` / `!resume` | Pause or resume playback |
+| `!seek <mm:ss>` | Jump to a position (e.g. `!seek 1:30`) |
+| `!volume <0-300>` | Set volume percent (100 = normal) |
+| `!loop <off\|track\|queue>` | Repeat the track, the whole queue, or nothing |
+| `!shuffle [on\|off]` | Toggle shuffle mode, or shuffle the queue now |
+| `!autoplay <on\|off>` | Keep playing related tracks when the queue empties |
+| `!stop` | Stop playback and clear the queue |
+| `!clear` | Clear the queue but keep playing |
+| `!save <name>` | Save the current track + queue as a playlist |
+| `!load <name>` | Queue a saved playlist (re-resolved fresh) |
+| `!delete <name>` | Delete a saved playlist |
+
+Saved playlists are stored as re-resolvable queries (URLs or "artist title"),
+not raw stream URLs — those expire — so loading always fetches fresh audio.
 
 ---
 
@@ -122,6 +145,24 @@ See `config.example.toml` for every option with comments.
 
 ---
 
+## Run as a service (Linux)
+
+To keep the bot running across reboots, use the included
+`deploy/simple-tt-media.service` as a template. Edit the paths, user, and
+secret env vars, then:
+
+```bash
+sudo cp deploy/simple-tt-media.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now simple-tt-media
+journalctl -u simple-tt-media -f        # follow the logs
+```
+
+The unit sets `Restart=on-failure`, so the bot comes back after crashes; it
+also reconnects on its own if the server connection drops.
+
+---
+
 ## How it's put together
 
 The code is split into small, single-responsibility pieces so it's easy to
@@ -133,8 +174,9 @@ ttmedia/
   sdk.py         Locate and load the official TeamTalk SDK robustly.
   bot.py         Connect/login/join, event loop, reconnect, send messages,
                  and start/stop media streams (the transport layer).
-  player.py      The queue + now-playing state machine (no SDK, testable).
+  player.py      The queue, playback modes, and live controls (no SDK, testable).
   commands.py    Parse "!" commands and dispatch them.
+  storage.py     Saved playlists (JSON; stores re-resolvable queries).
   models.py      Track / ResolveResult data types.
   sources/       One plugin per service; a registry dispatches queries.
     base.py        The Source contract.

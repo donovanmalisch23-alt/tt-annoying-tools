@@ -10,7 +10,10 @@ from ttmedia.player import MediaPlayer
 
 
 class FakeStreamer:
-    def stream(self, url):
+    def stream(self, url, gain):
+        return True
+
+    def update(self, offset_ms, paused, gain):
         return True
 
     def stop(self):
@@ -31,12 +34,15 @@ class FakeRegistry:
             requested_by=requested_by)])
 
 
-def build(ops=None):
+def build(ops=None, tmp_path=None):
+    import tempfile
+    from ttmedia.storage import PlaylistStore
     cfg = Config()
     cfg.bot.operators = ops or []
     player = MediaPlayer(FakeStreamer(), lambda m: None)
     registry = FakeRegistry()
-    return CommandHandler(cfg, player, registry), player, registry
+    store = PlaylistStore(tempfile.mktemp(suffix=".json"))
+    return CommandHandler(cfg, player, registry, store), player, registry
 
 
 def test_is_command():
@@ -78,3 +84,46 @@ def test_privileged_allowed_for_operator():
     out = []
     h.handle("admin", "!stop", out.append)
     assert out and "Stopped" in out[0]
+
+
+def test_volume_command():
+    h, player, _ = build(ops=["admin"])
+    out = []
+    h.handle("admin", "!volume 60", out.append)
+    assert player.volume == 60
+    assert out and "60%" in out[0]
+
+
+def test_volume_gated_for_non_operator():
+    h, _, _ = build(ops=["admin"])
+    out = []
+    h.handle("rando", "!volume 60", out.append)
+    assert out and "permission" in out[0].lower()
+
+
+def test_loop_command():
+    h, player, _ = build(ops=["admin"])
+    out = []
+    h.handle("admin", "!loop queue", out.append)
+    assert player.loop.value == "queue"
+
+
+def test_seek_bad_input():
+    h, player, _ = build(ops=["admin"])
+    # start something playing first
+    h.handle("admin", "!play song", lambda m: None)
+    import time
+    for _ in range(50):
+        if player.is_playing:
+            break
+        time.sleep(0.01)
+    out = []
+    h.handle("admin", "!seek abc", out.append)
+    assert out and "mm:ss" in out[0].lower()
+
+
+def test_queue_is_open_to_everyone():
+    h, _, _ = build(ops=["admin"])
+    out = []
+    h.handle("rando", "!queue", out.append)
+    assert out and "permission" not in out[0].lower()

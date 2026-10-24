@@ -55,7 +55,11 @@ class BotConfig:
 class PlaybackConfig:
     announce_now_playing: bool = True   # post "Now playing ..." to the channel
     max_queue: int = 200
-    # SDK media stream offset/volume knobs can grow here later.
+    default_volume: int = 100           # percent; 100 == normal gain
+    loop: str = "off"                   # off | track | queue
+    shuffle: bool = False
+    autoplay: bool = False              # keep playing related tracks when idle
+    playlists_file: str = "playlists.json"
 
 
 @dataclass
