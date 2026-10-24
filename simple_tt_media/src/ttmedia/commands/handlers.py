@@ -318,7 +318,7 @@ def cmd_help(ctx: CommandContext) -> None:
             continue
         groups.setdefault(cmd.group, []).append(cmd)
     lines = ["Simple TT Media — send these to me in a private message:"]
-    for group in ("Playback", "Queue", "Information", "Admin"):
+    for group in ("Playback", "Queue", "Information", "Access", "Admin"):
         cmds = groups.get(group)
         if not cmds:
             continue
@@ -347,6 +347,16 @@ def cmd_quit(ctx: CommandContext) -> None:
         ctx.player.stop()
     finally:
         ctx.client.shutdown()
+
+
+def cmd_lock(ctx: CommandContext) -> None:
+    lm = ctx.dispatcher.lock_manager
+    if lm is None:
+        raise CommandError("Locking is not available.")
+    # The lock manager decides everything from the current state and who sent
+    # it: admins lock (with a password they set), anyone unlocks (with it), and
+    # a non-admin trying to lock an unlocked bot gets an error.
+    lm.request(ctx.user_id, ctx.requester, ctx.is_admin, ctx.is_private, ctx.reply)
 
 
 # --------------------------------------------------------------------------
@@ -425,6 +435,13 @@ def register_all(d: Dispatcher) -> None:
                 group="Information"),
         Command("about", cmd_about, ["info"], summary="About this bot",
                 group="Information"),
+        Command("lock", cmd_lock, [], usage="lock",
+                summary="Lock the bot (admins), or unlock it with the password",
+                help="Admins lock the bot: you'll be asked privately for a "
+                     "password to set, then commands are disabled for everyone. "
+                     "While locked, anyone can send 'lock' and will be asked "
+                     "privately for that password to unlock it. Non-admins "
+                     "cannot lock an unlocked bot.", group="Access"),
         Command("say", cmd_say, [], admin=True, usage="say <message>",
                 summary="Make the bot post a message in its channel", group="Admin"),
         Command("quit", cmd_quit, ["shutdown"], admin=True,

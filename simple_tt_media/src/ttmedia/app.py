@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from .commands import build_dispatcher
 from .config import Config
+from .lock import LockManager
 from .log import get_logger
 from .models import Track
 from .player import Player
@@ -42,8 +43,10 @@ class TTMediaApp:
         self._player = Player(
             self._engine, announce=self._announce,
             resolve_fn=self._sources.resolve, max_queue=cfg.sources.max_playlist_tracks)
+        self._lock = LockManager(self._client)
         self._dispatcher = build_dispatcher(
-            self._player, self._sources, self._client, cfg)
+            self._player, self._sources, self._client, cfg,
+            lock_manager=self._lock)
 
         self._client.on_ready = self._on_ready
         self._client.on_text_message = self._on_text_message

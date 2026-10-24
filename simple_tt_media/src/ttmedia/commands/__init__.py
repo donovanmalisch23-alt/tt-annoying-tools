@@ -49,11 +49,12 @@ class Command:
 
 
 class Dispatcher:
-    def __init__(self, player, sources, client, cfg) -> None:
+    def __init__(self, player, sources, client, cfg, lock_manager=None) -> None:
         self.player = player
         self.sources = sources
         self.client = client
         self.cfg = cfg
+        self.lock_manager = lock_manager
         self._commands: Dict[str, Command] = {}
         self._by_name: Dict[str, Command] = {}
         # Per-user transient state (last search results for `select`).
@@ -91,9 +92,23 @@ class Dispatcher:
     def handle(self, *, text: str, requester: str, user_id: int,
                is_admin: bool, is_private: bool,
                reply: Callable[[str], None]) -> None:
-        name, _, arg = text.strip().partition(" ")
+        text = text.strip()
+        if not text:
+            return
+        lm = self.lock_manager
+        # A private message from someone we asked for a password is the
+        # password, not a command — capture it before any parsing.
+        if is_private and lm is not None and lm.has_pending(user_id):
+            lm.submit_password(user_id, text)
+            return
+        name, _, arg = text.partition(" ")
         name = name.strip()
-        if not name:
+        command = self.lookup(name)
+        is_lock_cmd = command is not None and command.name == "lock"
+        # While locked, every command except `lock` itself is refused.
+        if lm is not None and lm.locked and not is_lock_cmd:
+            reply("The bot is locked. Send 'lock' and the unlock password "
+                  "to use it again.")
             return
         ctx = CommandContext(
             dispatcher=self, player=self.player, sources=self.sources,
@@ -120,8 +135,8 @@ class Dispatcher:
             ctx.reply(f"Sorry, something went wrong: {exc}")
 
 
-def build_dispatcher(player, sources, client, cfg) -> Dispatcher:
+def build_dispatcher(player, sources, client, cfg, lock_manager=None) -> Dispatcher:
     from . import handlers
-    d = Dispatcher(player, sources, client, cfg)
+    d = Dispatcher(player, sources, client, cfg, lock_manager=lock_manager)
     handlers.register_all(d)
     return d
