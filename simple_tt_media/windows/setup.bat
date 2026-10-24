@@ -41,8 +41,22 @@ echo no separate SDK or ffmpeg install is needed on Windows.
 echo.
 echo Launching the setup wizard...
 python setup_bot.py
+set "WIZARD_RC=%ERRORLEVEL%"
 
 echo.
-echo Done. Start the bot later by double-clicking windows\run.bat
+if not "%WIZARD_RC%"=="0" (
+    echo [!!] Setup did not complete successfully ^(exit code %WIZARD_RC%^).
+    echo      Scroll up to see what went wrong; config.toml may not have been saved.
+    pause
+    exit /b %WIZARD_RC%
+)
+if not exist "config.toml" (
+    echo [!!] Setup finished but config.toml was not created. Please re-run setup.
+    pause
+    exit /b 1
+)
+
+echo [ok] Setup complete. config.toml was created.
+echo Start the bot by double-clicking windows\run.bat
 pause
 endlocal

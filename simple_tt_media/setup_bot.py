@@ -27,7 +27,9 @@ from ttmedia.config import (  # noqa: E402
     BotConfig, Config, PlaybackConfig, ServerConfig, SourcesConfig, SdkConfig,
     DEFAULT_CONFIG_PATH, dump_config, save_config,
 )
-from ttmedia.sdk import SDK_DOWNLOAD, find_sdk_dir  # noqa: E402
+from ttmedia.sdk import (  # noqa: E402
+    SDK_DOWNLOAD, SdkNotFoundError, find_sdk_dir, load_sdk,
+)
 
 
 # --- small prompt helpers --------------------------------------------------
@@ -75,12 +77,34 @@ def configure_sdk() -> SdkConfig:
     if found:
         print(f"Found the TeamTalk SDK at: {found}")
         if ask_bool("Use this SDK location?", True):
+            _verify_sdk(str(found))
             return SdkConfig(path=str(found))
     print(f"The TeamTalk 5 SDK is required. Download it from:\n  {SDK_DOWNLOAD}")
     print("Then point to the folder that contains TeamTalk5.py and the "
           "native library (libTeamTalk5.so / .dylib / TeamTalk5.dll).")
     path = ask("SDK folder path (blank if already on PYTHONPATH)", str(found or ""))
+    _verify_sdk(path)
     return SdkConfig(path=path)
+
+
+def _verify_sdk(path: str) -> bool:
+    """Actually load the SDK now so import problems surface at setup time.
+
+    Non-fatal: prints a clear result and returns True/False. Setup continues
+    either way so a config file is still written.
+    """
+    print("Verifying the SDK loads on this machine...")
+    try:
+        tt = load_sdk(path)
+        version = tt.ttstr(tt.getVersion())
+        print(f"[ok] TeamTalk SDK loaded (version {version}).")
+        return True
+    except SdkNotFoundError as exc:
+        print(f"[!!] The SDK could not be loaded:\n     {exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!!] Unexpected error loading the SDK: {exc}")
+        return False
 
 
 def configure_server() -> ServerConfig:
@@ -233,8 +257,15 @@ def main() -> int:
             f"{path} exists. Overwrite?", False):
         print("Not saved.")
         return 1
-    save_config(cfg, path)
-    print(f"\nSaved {path}.")
+    try:
+        save_config(cfg, path)
+    except OSError as exc:
+        print(f"\n[!!] Failed to write {path}: {exc}")
+        return 1
+    if not Path(path).is_file():
+        print(f"\n[!!] {path} was not created.")
+        return 1
+    print(f"\n[ok] Saved {path}.")
 
     maybe_test_connection(cfg)
 

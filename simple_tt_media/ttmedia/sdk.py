@@ -60,14 +60,31 @@ def _looks_like_sdk_dir(path: Path) -> bool:
     return (path / "TeamTalk5.py").is_file()
 
 
+def _native_dirs(sdk_dir: Path) -> tuple[Path, ...]:
+    """Folders that may hold the native library, for a given wrapper folder.
+
+    The official SDK keeps the wrapper in ``TeamTalkPy/`` and the native
+    library in a sibling ``TeamTalk_DLL/``; a flat folder (everything in one
+    directory) is also supported.
+    """
+    return (sdk_dir, sdk_dir.parent / "TeamTalk_DLL")
+
+
+def _find_native_lib(sdk_dir: Path) -> Optional[Path]:
+    """Locate the platform's native library near the wrapper folder."""
+    for folder in _native_dirs(sdk_dir):
+        for name in _native_lib_names():
+            candidate = folder / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def _windows_dll_dir(sdk_dir: Path) -> Optional[Path]:
     """Find the folder that holds TeamTalk5.dll for a given wrapper folder."""
-    if (sdk_dir / "TeamTalk5.dll").is_file():
-        return sdk_dir
-    # Official SDK layout: TeamTalkPy/ next to TeamTalk_DLL/.
-    sibling = sdk_dir.parent / "TeamTalk_DLL"
-    if (sibling / "TeamTalk5.dll").is_file():
-        return sibling
+    for folder in _native_dirs(sdk_dir):
+        if (folder / "TeamTalk5.dll").is_file():
+            return folder
     return None
 
 
@@ -77,11 +94,27 @@ def _prepare_native(sdk_dir: Path) -> None:
     Raises :class:`SdkNotFoundError` only when we find the library but it
     cannot be loaded (a version/architecture mismatch).
     """
+    lib_path = _find_native_lib(sdk_dir)
+
     if sys.platform == "win32":
+        # Register the DLL's folder so the wrapper's bare-name load resolves,
+        # and pre-load it by absolute path for a clear error on a bad arch.
         dll_dir = _windows_dll_dir(sdk_dir)
         if dll_dir is not None:
             os.add_dll_directory(str(dll_dir))
             log.debug("Added DLL directory %s", dll_dir)
+        if lib_path is not None:
+            try:
+                ctypes.CDLL(str(lib_path))
+                log.debug("Pre-loaded %s", lib_path)
+            except OSError as exc:
+                raise SdkNotFoundError(
+                    f"Found {lib_path} but Windows could not load it: {exc}\n"
+                    "The most common cause is an architecture mismatch: the "
+                    "bundled TeamTalk5.dll is 64-bit, so you must run 64-bit "
+                    "Python. On Windows 'N' editions, install the Media "
+                    "Feature Pack (the DLL uses Windows Media Foundation)."
+                ) from exc
         else:
             log.warning(
                 "TeamTalk5.dll not found near %s; relying on PATH / cwd.",
@@ -89,31 +122,33 @@ def _prepare_native(sdk_dir: Path) -> None:
             )
         return
 
-    # Linux / macOS: pre-load the shared library by absolute path.
-    for lib_name in _native_lib_names():
-        lib_path = sdk_dir / lib_name
-        if lib_path.is_file():
-            try:
-                mode = getattr(ctypes, "RTLD_GLOBAL", 0)
-                ctypes.CDLL(str(lib_path), mode=mode)
-                log.debug("Pre-loaded native library %s", lib_path)
-            except OSError as exc:
-                raise SdkNotFoundError(
-                    f"Found {lib_path} but could not load it: {exc}\n"
-                    "This usually means a 32/64-bit or platform mismatch "
-                    "between the wrapper and the native library."
-                ) from exc
-            return
-    log.warning(
-        "No native TeamTalk library found in %s; relying on the system "
-        "loader to locate it.", sdk_dir,
-    )
+    # Linux / macOS: pre-load the shared library by absolute path with
+    # RTLD_GLOBAL so the wrapper's bare-name load resolves to it.
+    if lib_path is None:
+        log.warning(
+            "No native TeamTalk library found near %s; relying on the system "
+            "loader to locate it.", sdk_dir,
+        )
+        return
+    try:
+        ctypes.CDLL(str(lib_path), mode=getattr(ctypes, "RTLD_GLOBAL", 0))
+        log.debug("Pre-loaded native library %s", lib_path)
+    except OSError as exc:
+        raise SdkNotFoundError(
+            f"Found {lib_path} but could not load it: {exc}\n"
+            "This usually means a 32/64-bit or platform mismatch between the "
+            "wrapper and the native library."
+        ) from exc
 
 
 def bundled_sdk_dir() -> Path:
-    """The SDK that ships inside this project (simple_tt_media/sdk)."""
+    """The wrapper folder of the SDK bundled with this project.
+
+    Layout: simple_tt_media/sdk/TeamTalkPy/TeamTalk5.py with the native
+    libraries in the sibling simple_tt_media/sdk/TeamTalk_DLL/.
+    """
     # ttmedia/sdk.py -> parent is ttmedia/, its parent is the project root.
-    return Path(__file__).resolve().parent.parent / "sdk"
+    return Path(__file__).resolve().parent.parent / "sdk" / "TeamTalkPy"
 
 
 def find_sdk_dir(configured: str = "") -> Optional[Path]:
@@ -127,12 +162,17 @@ def find_sdk_dir(configured: str = "") -> Optional[Path]:
         candidates.append(Path(configured).expanduser())
     candidates.append(bundled_sdk_dir())
     candidates.extend(Path(g) for g in _DEFAULT_GUESSES)
+    # For each candidate, accept it if it holds TeamTalk5.py, or if a known
+    # sub-path does (so pointing at an unpacked SDK root also works).
+    subdirs = ("", "TeamTalkPy", "Library/TeamTalkPy")
     for cand in candidates:
-        try:
-            if cand.is_dir() and _looks_like_sdk_dir(cand):
-                return cand.resolve()
-        except OSError:
-            continue
+        for sub in subdirs:
+            path = cand / sub if sub else cand
+            try:
+                if path.is_dir() and _looks_like_sdk_dir(path):
+                    return path.resolve()
+            except OSError:
+                continue
     return None
 
 
