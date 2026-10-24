@@ -107,14 +107,37 @@ def test_windows_dll_dir_missing(tmp_path):
 
 def test_bundled_sdk_present():
     """The TeamTalk SDK is shipped with the project for zero-config use."""
+    from ttmedia.sdk import bundled_sdk_dir, _find_native_lib
+    wrapper = bundled_sdk_dir()                 # sdk/TeamTalkPy
+    assert (wrapper / "TeamTalk5.py").is_file(), "wrapper missing"
+    sdk_root = wrapper.parent                   # sdk/
+    assert (sdk_root / "License.txt").is_file(), "SDK License.txt must be kept"
+    dll = sdk_root / "TeamTalk_DLL"
+    assert (dll / "TeamTalk5.dll").is_file(), "Windows DLL missing"
+    assert (dll / "libTeamTalk5.so").is_file(), "Linux .so missing"
+    # The native lib must be discoverable from the wrapper folder.
+    assert _find_native_lib(wrapper) is not None
+
+
+def test_bundled_windows_sibling_layout():
+    """The wrapper's win32 branch does add_dll_directory(<dir>/../TeamTalk_DLL),
+    which raises if that folder is absent. Prove it exists with the DLL."""
+    import os
     from ttmedia.sdk import bundled_sdk_dir
-    d = bundled_sdk_dir()
-    assert (d / "TeamTalk5.py").is_file(), "wrapper missing from bundled sdk/"
-    assert (d / "TeamTalk5.dll").is_file(), "Windows DLL missing from bundled sdk/"
-    assert (d / "libTeamTalk5.so").is_file(), "Linux .so missing from bundled sdk/"
-    assert (d / "License.txt").is_file(), "SDK License.txt must be kept"
+    wrapper = bundled_sdk_dir()
+    sibling = (wrapper / ".." / "TeamTalk_DLL").resolve()
+    assert os.path.isdir(sibling), "wrapper's expected DLL folder is missing"
+    assert (sibling / "TeamTalk5.dll").is_file()
 
 
 def test_find_sdk_dir_prefers_bundled():
     from ttmedia.sdk import find_sdk_dir, bundled_sdk_dir
     assert find_sdk_dir("") == bundled_sdk_dir()
+
+
+def test_find_sdk_dir_accepts_sdk_root(tmp_path):
+    """Pointing sdk.path at an unpacked SDK root (with TeamTalkPy/) works."""
+    from ttmedia.sdk import find_sdk_dir
+    (tmp_path / "TeamTalkPy").mkdir()
+    (tmp_path / "TeamTalkPy" / "TeamTalk5.py").write_text("")
+    assert find_sdk_dir(str(tmp_path)) == (tmp_path / "TeamTalkPy").resolve()

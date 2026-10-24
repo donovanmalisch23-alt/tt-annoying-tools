@@ -47,16 +47,19 @@ from the original. This is the standard, compliant approach music bots take.
 
 1. **Python 3.11+**
 2. **The TeamTalk 5 SDK — already bundled.** The official TeamTalk 5 SDK
-   v5.22a ships in [`sdk/`](sdk/): the platform-aware `TeamTalk5.py` wrapper,
-   the Linux `libTeamTalk5.so`, and the Windows (x64) `TeamTalk5.dll`. The bot
-   finds it automatically — no separate download or `sdk.path` needed. (To use
-   a different version, set `sdk.path` or the `TEAMTALK_SDK` env var.)
+   v5.22a ships in [`sdk/`](sdk/), using the SDK's own folder layout:
+   `sdk/TeamTalkPy/TeamTalk5.py` (the platform-aware wrapper) beside
+   `sdk/TeamTalk_DLL/` holding the Windows x64 `TeamTalk5.dll` and the Linux
+   `libTeamTalk5.so`. The bot finds it automatically — no separate download or
+   `sdk.path` needed. (To use a different version, set `sdk.path` or the
+   `TEAMTALK_SDK` env var to an unpacked SDK folder.)
    > The SDK is © BearWare.dk and runs in *trial mode* without a license key;
    > its `sdk/License.txt` is kept intact. A license key is required for
    > non-evaluation use and redistribution — see <https://bearware.dk>.
-3. **ffmpeg** — needed to decode media on **Linux/macOS** (`sudo apt install
-   ffmpeg` or `brew install ffmpeg`). On Windows it's built into the bundled
-   `TeamTalk5.dll`, so no separate install is required there.
+3. **Media decoding** — on **Windows** this is built into the bundled
+   `TeamTalk5.dll` (via Windows Media Foundation); nothing to install. On
+   **Linux/macOS** install **ffmpeg** (`sudo apt install ffmpeg` or
+   `brew install ffmpeg`).
 4. **A bot account on the server** with the *Transmit media files* user right.
 5. **macOS only:** the SDK's `libTeamTalk5.dylib` isn't bundled (download it
    from BearWare and point `sdk.path` at it).
