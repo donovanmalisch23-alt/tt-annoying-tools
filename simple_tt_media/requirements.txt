@@ -1,12 +1,14 @@
 # Runtime dependencies for Simple TT Media.
-# The TeamTalk 5 SDK itself (TeamTalk5.py + native library) is NOT on PyPI:
-# download it from https://bearware.dk/?page_id=419 and point sdk.path at it.
+# (Setup.bat installs these into a local virtual environment for you.)
 
-# YouTube resolution and search (also the audio backend for Spotify/Apple Music).
-yt-dlp>=2024.1.0
+# Resolves YouTube / SoundCloud / Bandcamp / etc. and the audio for Spotify
+# and Apple Music tracks.
+yt-dlp>=2025.1.1
 
-# Spotify metadata (only needed if you enable Spotify links).
-spotipy>=2.23.0
+# Optional, not required: speeds up live volume scaling if present.
+# numpy>=1.26
 
-# Note: ffmpeg (a system package, not pip) is required by the SDK to decode
-# media. Install it via your OS package manager, e.g. `apt install ffmpeg`.
+# Also required but NOT a pip package:
+#   * ffmpeg  — Setup.bat downloads a static build into tools\ffmpeg
+#   * deno    — Setup.bat downloads it into tools\deno (YouTube needs a JS runtime)
+# The TeamTalk 5 SDK is bundled in sdk\ (no download needed).

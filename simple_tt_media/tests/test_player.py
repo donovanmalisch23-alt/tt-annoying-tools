@@ -1,176 +1,174 @@
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from ttmedia.models import Track
-from ttmedia.player import MediaPlayer
+from ttmedia.models import RepeatMode, Track
+from ttmedia.player import Player
 
 
-class FakeStreamer:
-    def __init__(self, succeed=True):
-        self.succeed = succeed
-        self.started = []
-        self.stops = 0
-        self.updates = []
+class FakeEngine:
+    def __init__(self):
+        self.played = []
+        self.stopped = 0
+        self._paused = False
+        self._playing = False
+        self._vol = 100
+        self._elapsed = 0.0
 
-    def stream(self, url, gain):
-        self.started.append((url, gain))
-        return self.succeed
-
-    def update(self, offset_ms, paused, gain):
-        self.updates.append((offset_ms, paused, gain))
-        return True
+    def play(self, track):
+        self.played.append(track)
+        self._playing = True
+        self._paused = False
 
     def stop(self):
-        self.stops += 1
+        self.stopped += 1
+        self._playing = False
+        self._paused = False
+
+    def pause(self):
+        if self._playing and not self._paused:
+            self._paused = True
+            return True
+        return False
+
+    def resume(self):
+        if self._playing and self._paused:
+            self._paused = False
+            return True
+        return False
+
+    def seek(self, s):
+        self._elapsed = s
+        return self._playing
+
+    def set_volume(self, p):
+        self._vol = max(0, min(200, p))
+        return round(self._vol)
+
+    @property
+    def is_playing(self):
+        return self._playing
+
+    @property
+    def is_paused(self):
+        return self._paused
+
+    @property
+    def volume_percent(self):
+        return round(self._vol)
+
+    def elapsed(self):
+        return self._elapsed
 
 
-def make_track(name):
-    return Track(title=name, stream_url=f"http://x/{name}", source="test")
+def track(name, **kw):
+    return Track(title=name, playback_url=f"http://x/{name}", source="test", **kw)
 
 
-def collect_announcer():
-    msgs = []
-    return msgs, msgs.append
+def make(resolve=lambda t: True):
+    eng = FakeEngine()
+    announces = []
+    p = Player(eng, announce=announces.append, resolve_fn=resolve)
+    return p, eng, announces
 
 
 def test_enqueue_starts_immediately():
-    streamer = FakeStreamer()
-    msgs, announce = collect_announcer()
-    p = MediaPlayer(streamer, announce)
-    pos = p.enqueue([make_track("a")])
-    assert pos == 0
-    assert p.is_playing
-    assert streamer.started[0][0] == "http://x/a"
-    assert any("Now playing" in m for m in msgs)
+    p, eng, ann = make()
+    assert p.enqueue([track("a")]) == 0
+    assert eng.played[0].title == "a"
+    assert any("Now playing" in m for m in ann)
 
 
 def test_second_track_queues():
-    p = MediaPlayer(FakeStreamer(), lambda m: None)
-    p.enqueue([make_track("a")])
-    pos = p.enqueue([make_track("b")])
-    assert pos == 1
+    p, eng, _ = make()
+    p.enqueue([track("a")])
+    assert p.enqueue([track("b")]) == 1
     assert len(p.queue_snapshot()) == 1
 
 
-def test_finish_advances_queue():
-    streamer = FakeStreamer()
-    p = MediaPlayer(streamer, lambda m: None)
-    p.enqueue([make_track("a"), make_track("b")])
-    assert p.current.title == "a"
-    p.on_stream_finished(success=True)
+def test_finish_advances():
+    p, eng, _ = make()
+    p.enqueue([track("a"), track("b")])
+    cur = p.current
+    p.on_track_finished(cur, "finished")
     assert p.current.title == "b"
-    p.on_stream_finished(success=True)
+    p.on_track_finished(p.current, "finished")
     assert p.current is None
 
 
-def test_skip():
-    streamer = FakeStreamer()
-    p = MediaPlayer(streamer, lambda m: None)
-    p.enqueue([make_track("a"), make_track("b")])
-    nxt = p.skip()
-    assert nxt.title == "b"
-    assert streamer.stops == 1
+def test_repeat_track():
+    p, eng, _ = make()
+    p.set_repeat(RepeatMode.TRACK)
+    p.enqueue([track("a")])
+    cur = p.current
+    p.on_track_finished(cur, "finished")
+    assert p.current.title == "a"
 
 
-def test_stop_clears():
-    streamer = FakeStreamer()
-    p = MediaPlayer(streamer, lambda m: None)
-    p.enqueue([make_track("a"), make_track("b")])
+def test_repeat_queue_cycles():
+    p, eng, _ = make()
+    p.set_repeat(RepeatMode.QUEUE)
+    p.enqueue([track("a"), track("b")])
+    p.on_track_finished(p.current, "finished")
+    assert p.current.title == "b"
+    p.on_track_finished(p.current, "finished")
+    assert p.current.title == "a"
+
+
+def test_error_reresolves_once_then_skips():
+    attempts = {"n": 0}
+
+    def resolve(t):
+        attempts["n"] += 1
+        return False  # never resolves -> should give up after one retry
+
+    p, eng, ann = make(resolve=resolve)
+    t = Track(title="bad", query="something", playback_url="http://x",
+              source="youtube")
+    p.enqueue([t])                      # plays immediately (already has url)
+    p.on_track_finished(p.current, "error")   # schedule a retry (needs resolve)
+    # retry attempt resolves -> False -> skipped
+    assert p.current is None
+    assert any("Couldn't play" in m or "couldn't load" in m.lower() for m in ann)
+
+
+def test_stop_then_late_callback_ignored():
+    p, eng, _ = make()
+    p.enqueue([track("a"), track("b")])
+    cur = p.current
     p.stop()
+    # a late finish for the stopped track must not resurrect playback
+    p.on_track_finished(cur, "finished")
     assert p.current is None
     assert p.queue_snapshot() == []
 
 
-def test_clear_keeps_current():
-    p = MediaPlayer(FakeStreamer(), lambda m: None)
-    p.enqueue([make_track("a"), make_track("b"), make_track("c")])
-    removed = p.clear()
-    assert removed == 2
+def test_skip_and_previous():
+    p, eng, _ = make()
+    p.enqueue([track("a"), track("b")])
+    p.skip()
+    assert p.current.title == "b"
+    p.previous()
     assert p.current.title == "a"
 
 
-def test_unplayable_track_is_skipped():
-    streamer = FakeStreamer(succeed=False)
-    msgs, announce = collect_announcer()
-    p = MediaPlayer(streamer, announce)
-    p.enqueue([make_track("a")])
-    assert p.current is None
-    assert any("couldn't play" in m.lower() for m in msgs)
+def test_select_drops_earlier():
+    p, eng, _ = make()
+    p.enqueue([track("a"), track("b"), track("c"), track("d")])
+    # playing a; queue b,c,d. select 2 -> play c
+    p.select(2)
+    assert p.current.title == "c"
+
+
+def test_volume_and_shuffle_flags():
+    p, eng, _ = make()
+    assert p.set_volume(250) == 200  # capped by fake engine
+    p.set_shuffle(True)
+    assert p.shuffle is True
 
 
 def test_queue_full_raises():
-    p = MediaPlayer(FakeStreamer(), lambda m: None, max_queue=1)
+    p, eng, _ = make()
+    p2 = Player(eng, announce=lambda m: None, resolve_fn=lambda t: True, max_queue=1)
     try:
-        p.enqueue([make_track("a"), make_track("b")])
-    except ValueError as exc:
-        assert "full" in str(exc).lower()
+        p2.enqueue([track("a"), track("b")])
+    except ValueError as e:
+        assert "full" in str(e).lower()
     else:
         raise AssertionError("expected ValueError")
-
-
-def test_volume_maps_to_gain():
-    streamer = FakeStreamer()
-    from ttmedia.player import percent_to_gain
-    p = MediaPlayer(streamer, lambda m: None, default_volume=100)
-    p.enqueue([make_track("a")])
-    # started with gain for 100%
-    assert p.volume == 100
-    pct = p.set_volume(50)
-    assert pct == 50
-    assert streamer.updates[-1][2] == percent_to_gain(50)
-
-
-def test_volume_clamped():
-    p = MediaPlayer(FakeStreamer(), lambda m: None)
-    assert p.set_volume(100000) <= 300 * 10  # within gain ceiling as percent
-
-
-def test_pause_resume():
-    streamer = FakeStreamer()
-    p = MediaPlayer(streamer, lambda m: None)
-    p.enqueue([make_track("a")])
-    assert p.pause() is True
-    assert p.is_paused
-    assert streamer.updates[-1][1] is True
-    assert p.resume() is True
-    assert not p.is_paused
-
-
-def test_loop_track_requeues():
-    from ttmedia.player import LoopMode
-    p = MediaPlayer(FakeStreamer(), lambda m: None, loop=LoopMode.TRACK)
-    p.enqueue([make_track("a")])
-    assert p.current.title == "a"
-    p.on_stream_finished(success=True)
-    assert p.current.title == "a"  # replayed
-
-
-def test_loop_queue_cycles():
-    from ttmedia.player import LoopMode
-    p = MediaPlayer(FakeStreamer(), lambda m: None, loop=LoopMode.QUEUE)
-    p.enqueue([make_track("a"), make_track("b")])
-    assert p.current.title == "a"
-    p.on_stream_finished(success=True)
-    assert p.current.title == "b"
-    p.on_stream_finished(success=True)
-    assert p.current.title == "a"  # 'a' cycled back
-
-
-def test_seek_passes_offset():
-    streamer = FakeStreamer()
-    p = MediaPlayer(streamer, lambda m: None)
-    p.enqueue([make_track("a")])
-    assert p.seek(90000) is True
-    assert streamer.updates[-1][0] == 90000
-
-
-def test_autoplay_triggers_fn_when_idle():
-    calls = []
-    p = MediaPlayer(FakeStreamer(), lambda m: None, autoplay=True,
-                    autoplay_fn=lambda seed: calls.append(seed))
-    p.enqueue([make_track("a")])
-    p.on_stream_finished(success=True)  # queue empties -> autoplay fires
-    assert len(calls) == 1
-    assert calls[0].title == "a"

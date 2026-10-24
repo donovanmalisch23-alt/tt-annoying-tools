@@ -1,47 +1,52 @@
-# Simple TT Media - example configuration.
-# Copy to config.toml and edit, or just run `python setup_bot.py`.
-#
-# Secrets can be left blank here and supplied via environment variables:
-#   TT_PASSWORD, TT_CHANNEL_PASSWORD, SPOTIFY_CLIENT_ID,
-#   SPOTIFY_CLIENT_SECRET, TEAMTALK_SDK
+# Simple TT Media configuration.
+# Secrets may instead be set via environment variables:
+#   TTMEDIA_PASSWORD, TTMEDIA_CHANNEL_PASSWORD, TTMEDIA_SDK
 
 log_level = "INFO"
+log_file = ""
 
 [server]
 host = "teamtalk.example.com"
 tcp_port = 10333
 udp_port = 10333
-username = "mediabot"
-password = ""              # prefer TT_PASSWORD env var
-channel = "/Music"         # "/" for the root channel
-channel_password = ""
 encrypted = false
+username = "mediabot"
+password = ""
+nickname = "MediaBot"
+status_message = "Send me a private message with 'h' for help"
+channel = "/Music"
+channel_password = ""
 
 [bot]
-nickname = "MediaBot"
-status_message = "Ready to play music"
-gender = "neutral"
-command_prefix = "!"
-operators = []             # empty = everyone may control the bot
+admins = ["youradminname"]
+channel_prefix = ""
 reconnect_seconds = 5
-
-[playback]
 announce_now_playing = true
-max_queue = 200
-default_volume = 100          # percent (100 = normal)
-loop = "off"                  # off | track | queue
-shuffle = false
-autoplay = false              # keep playing related tracks when the queue empties
-playlists_file = "playlists.json"
+
+[audio]
+sample_rate = 48000
+channels = 2
+frame_ms = 20
+lead_ms = 350
+default_volume = 100
+max_volume = 200
+max_track_seconds = 0
 
 [sources]
-youtube_enabled = true
-spotify_enabled = false
+youtube = true
+soundcloud = true
+spotify = true
 spotify_client_id = ""
 spotify_client_secret = ""
-applemusic_enabled = false
+applemusic = true
+direct_url = true
+max_search_results = 20
+max_playlist_tracks = 500
+
+[tools]
+ffmpeg_path = ""
+deno_path = ""
 
 [sdk]
-# Folder containing TeamTalk5.py and the native library.
-# Blank = already importable (on PYTHONPATH) or auto-detected in ./sdk.
 path = ""
+

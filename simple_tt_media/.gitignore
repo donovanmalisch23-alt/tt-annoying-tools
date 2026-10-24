@@ -2,13 +2,15 @@
 config.toml
 *.env
 .env
+*.log
 
-# The TeamTalk SDK is bundled in sdk/ and intentionally committed.
-# Ignore any SDK copies a user drops elsewhere in the tree.
-/TeamTalk5.py
-/libTeamTalk5.so
-/libTeamTalk5.dylib
+# Downloaded helper tools (ffmpeg, deno) — installed by Setup.bat
+/tools/
+
+# The TeamTalk SDK is bundled in sdk/ and intentionally committed; ignore
+# stray copies dropped elsewhere.
 /TeamTalk5.dll
+/libTeamTalk5.so
 
 # Python
 __pycache__/
@@ -19,16 +21,10 @@ build/
 dist/
 .venv/
 venv/
-
-# Caches / editors
 .pytest_cache/
 .mypy_cache/
-.DS_Store
-.idea/
-.vscode/
 
-# Downloaded media scratch
-*.part
-*.tmp
-downloads/
-.pytest_cache/
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

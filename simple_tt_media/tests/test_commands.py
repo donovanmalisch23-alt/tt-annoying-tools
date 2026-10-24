@@ -1,129 +1,145 @@
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from ttmedia.commands import CommandHandler
-from ttmedia.config import Config
-from ttmedia.models import ResolveResult, Track
-from ttmedia.player import MediaPlayer
+from ttmedia.commands import build_dispatcher
+from ttmedia.errors import SourceError
+from ttmedia.models import Track
 
 
-class FakeStreamer:
-    def stream(self, url, gain):
-        return True
+class FakePlayer:
+    def __init__(self):
+        self.current = None
+        self._q = []
 
-    def update(self, offset_ms, paused, gain):
+    def enqueue(self, tracks):
+        if self.current is None:
+            self.current = tracks[0]
+            return 0
+        self._q.extend(tracks)
+        return len(self._q)
+
+    def queue_snapshot(self):
+        return list(self._q)
+
+    @property
+    def is_paused(self):
+        return False
+
+    def toggle_pause(self):
         return True
 
     def stop(self):
-        pass
+        self.current = None
+        self._q.clear()
 
 
-class FakeRegistry:
+class FakeSources:
+    service = "youtube"
+
+    def is_url(self, t):
+        return t.startswith("http")
+
+    def services(self):
+        return ["youtube", "soundcloud", "apple"]
+
+    def set_service(self, n):
+        if n not in self.services():
+            raise SourceError(f"Unknown service '{n}'.")
+        FakeSources.service = n
+
+    def from_input(self, text, requested_by=""):
+        return [Track(title="linked", playback_url="http://x", source="url")]
+
+    def search(self, query, requested_by="", limit=None):
+        return [Track(title=f"{query} #{i}", source="youtube",
+                      query=f"q{i}", needs_resolve=True) for i in range(1, 4)]
+
+
+class FakeClient:
     def __init__(self):
-        self.last_query = None
+        self.channel_msgs = []
+        self.stopped = False
 
-    def enabled_names(self):
-        return ["local", "youtube"]
+    def send_channel(self, text, channel_id=None):
+        self.channel_msgs.append(text)
 
-    def resolve(self, query, requested_by=""):
-        self.last_query = query
-        return ResolveResult(tracks=[Track(
-            title=query, stream_url="http://x", source="youtube",
-            requested_by=requested_by)])
+    def shutdown(self):
+        self.stopped = True
 
 
-def build(ops=None, tmp_path=None):
-    import tempfile
-    from ttmedia.storage import PlaylistStore
-    cfg = Config()
-    cfg.bot.operators = ops or []
-    player = MediaPlayer(FakeStreamer(), lambda m: None)
-    registry = FakeRegistry()
-    store = PlaylistStore(tempfile.mktemp(suffix=".json"))
-    return CommandHandler(cfg, player, registry, store), player, registry
+class Cfg:
+    class audio:
+        max_volume = 200
+        max_track_seconds = 0
 
 
-def test_is_command():
-    h, _, _ = build()
-    assert h.is_command("!play x")
-    assert not h.is_command("hello")
-
-
-def test_unknown_command_replies():
-    h, _, _ = build()
+def run(dispatcher, text, user_id=5, is_admin=False):
     out = []
-    h.handle("user", "!frobnicate", out.append)
-    assert out and "Unknown" in out[0]
-
-
-def test_play_resolves_and_queues():
-    h, player, registry = build()
-    out = []
-    h.handle("user", "!play never gonna give you up", out.append)
-    # worker thread resolves; join by polling player state
+    dispatcher.handle(text=text, requester="Tester", user_id=user_id,
+                      is_admin=is_admin, is_private=True, reply=out.append)
+    # commands run on a worker thread; wait for it
     import time
-    for _ in range(50):
-        if player.is_playing:
+    for _ in range(200):
+        if out:
             break
         time.sleep(0.01)
-    assert player.is_playing
-    assert registry.last_query == "never gonna give you up"
+    return out
 
 
-def test_privileged_blocked_for_non_operator():
-    h, player, _ = build(ops=["admin"])
-    out = []
-    h.handle("randomuser", "!stop", out.append)
-    assert out and "permission" in out[0].lower()
+def make():
+    player, sources, client = FakePlayer(), FakeSources(), FakeClient()
+    return build_dispatcher(player, sources, client, Cfg()), player, sources, client
 
 
-def test_privileged_allowed_for_operator():
-    h, player, _ = build(ops=["admin"])
-    out = []
-    h.handle("admin", "!stop", out.append)
-    assert out and "Stopped" in out[0]
+def test_unknown_command_errors():
+    d, *_ = make()
+    out = run(d, "frobnicate the wizzle")
+    assert out and "Unknown command" in out[0]
 
 
-def test_volume_command():
-    h, player, _ = build(ops=["admin"])
-    out = []
-    h.handle("admin", "!volume 60", out.append)
-    assert player.volume == 60
-    assert out and "60%" in out[0]
+def test_help_lists_commands():
+    d, *_ = make()
+    out = run(d, "h")
+    assert out and "Playback" in out[0] and "np" in out[0]
 
 
-def test_volume_gated_for_non_operator():
-    h, _, _ = build(ops=["admin"])
-    out = []
-    h.handle("rando", "!volume 60", out.append)
-    assert out and "permission" in out[0].lower()
+def test_help_for_one_command():
+    d, *_ = make()
+    out = run(d, "h seek")
+    assert out and "Usage:" in out[0]
 
 
-def test_loop_command():
-    h, player, _ = build(ops=["admin"])
-    out = []
-    h.handle("admin", "!loop queue", out.append)
-    assert player.loop.value == "queue"
+def test_search_then_select_by_number():
+    d, player, *_ = make()
+    run(d, "s daft punk")
+    out = run(d, "p 2")       # bare number plays result #2
+    assert player.current is not None
+    assert "#2" in player.current.title
 
 
-def test_seek_bad_input():
-    h, player, _ = build(ops=["admin"])
-    # start something playing first
-    h.handle("admin", "!play song", lambda m: None)
+def test_admin_only_blocked():
+    d, *_ = make()
+    out = run(d, "quit", is_admin=False)
+    assert out and "administrators only" in out[0].lower()
+
+
+def test_admin_quit_allowed():
+    d, player, sources, client = make()
+    run(d, "quit", is_admin=True)
     import time
-    for _ in range(50):
-        if player.is_playing:
+    for _ in range(200):
+        if client.stopped:
             break
         time.sleep(0.01)
-    out = []
-    h.handle("admin", "!seek abc", out.append)
-    assert out and "mm:ss" in out[0].lower()
+    assert client.stopped
 
 
-def test_queue_is_open_to_everyone():
-    h, _, _ = build(ops=["admin"])
-    out = []
-    h.handle("rando", "!queue", out.append)
-    assert out and "permission" not in out[0].lower()
+def test_service_switch_and_unknown():
+    d, player, sources, client = make()
+    out = run(d, "sv soundcloud")
+    assert out and "soundcloud" in out[0]
+    out = run(d, "sv nope")
+    assert out and "Unknown service" in out[0]
+
+
+def test_volume_usage_error():
+    d, *_ = make()
+    out = run(d, "v loud")
+    assert out and "Usage" in out[0]

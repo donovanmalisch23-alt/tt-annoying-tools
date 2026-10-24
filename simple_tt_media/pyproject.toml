@@ -4,24 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simple-tt-media"
-version = "0.1.0"
-description = "A simple, robust TeamTalk 5 media player bot with YouTube, Spotify and Apple Music support."
+version = "1.0.0"
+description = "An advanced media-player bot for TeamTalk 5 (Windows): YouTube, SoundCloud, Spotify, Apple Music and direct streams, controlled by private message."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "yt-dlp>=2024.1.0",
+    "yt-dlp>=2025.1.1",
 ]
 
 [project.optional-dependencies]
-spotify = ["spotipy>=2.23.0"]
+# Optional: speeds up live volume scaling. The bot works without it.
+fast = ["numpy>=1.26"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
 ttmedia = "ttmedia.__main__:main"
+ttmedia-setup = "ttmedia.setup_wizard:main"
 
 [tool.setuptools]
-packages = ["ttmedia", "ttmedia.sources"]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
