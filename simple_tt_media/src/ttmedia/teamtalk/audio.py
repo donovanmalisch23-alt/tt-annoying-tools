@@ -178,6 +178,23 @@ class AudioEngine:
             self._begin_locked(track, seconds, new_stream=False)
             return True
 
+    def restart_for_channel_change(self) -> bool:
+        """Re-init the voice stream after the bot is moved to a new channel.
+
+        The SDK configures its audio-input re-chunker for the channel's codec
+        when the stream starts; a move changes the codec frame size, so we end
+        the current input and begin a fresh stream (new stream id) at the same
+        position. Returns True if playback was restarted.
+        """
+        with self._lock:
+            if self._stopped or self._track is None:
+                return False
+            track = self._track
+            pos = 0.0 if track.is_live else self.elapsed()
+            self._stop_locked()
+            self._begin_locked(track, pos, new_stream=True)
+            return True
+
     def shutdown(self) -> None:
         self.stop()
 
