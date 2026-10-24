@@ -113,16 +113,48 @@ class Player:
                 self._current = None
             self._play_next_locked()
 
+    def enqueue_front(self, tracks: List[Track]) -> int:
+        """Add tracks to the front of the queue (play next), starting if idle.
+
+        Returns 0 if playback started immediately, else 1 (queued next).
+        """
+        with self._lock:
+            if len(self._queue) + len(tracks) > self._max_queue:
+                room = self._max_queue - len(self._queue)
+                raise ValueError(f"Queue is full (room for {max(0, room)} more).")
+            start_now = self._current is None and not self._queue
+            self._queue[:0] = tracks
+            if start_now:
+                self._play_next_locked()
+                return 0
+            return 1
+
     # ---- transport ------------------------------------------------------
 
-    def skip(self) -> Optional[Track]:
+    def skip(self, count: int = 1) -> Optional[Track]:
         with self._lock:
             self._engine.stop()
             if self._current is not None:
                 self._history.append(self._current)
                 self._current = None
+            # Drop (count - 1) further tracks from the queue before the next.
+            for _ in range(max(0, count - 1)):
+                nxt = self._pop_next_locked()
+                if nxt is None:
+                    break
+                self._history.append(nxt)
             self._play_next_locked()
             return self._current
+
+    def remove(self, index_1based: int) -> Optional[Track]:
+        with self._lock:
+            i = index_1based - 1
+            if i < 0 or i >= len(self._queue):
+                return None
+            return self._queue.pop(i)
+
+    def restart(self) -> bool:
+        return self._engine.seek(0.0)
 
     def previous(self) -> Optional[Track]:
         with self._lock:

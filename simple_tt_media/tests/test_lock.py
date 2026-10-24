@@ -95,6 +95,11 @@ class Cfg:
         max_volume = 200
         max_track_seconds = 0
 
+    class bot:
+        command_workers = 4
+        rate_limit_per_10s = 1000
+        max_user_queue = 0
+
 
 def _run(d, text, user_id, is_admin, reply):
     import time
