@@ -46,17 +46,20 @@ from the original. This is the standard, compliant approach music bots take.
 ## Requirements
 
 1. **Python 3.11+**
-2. **The TeamTalk 5 SDK** — download it from
-   <https://bearware.dk/?page_id=419> and unzip it. You need the folder that
-   contains `TeamTalk5.py` and the native library for your OS
-   (`libTeamTalk5.so` on Linux, `libTeamTalk5.dylib` on macOS,
-   `TeamTalk5.dll` on Windows). The SDK is **not** on PyPI and is not bundled
-   here.
-   > The SDK runs in *trial mode* unless you supply a license key from
-   > BearWare; see their site for licensing terms for non-evaluation use.
-3. **ffmpeg** — the SDK uses it to decode media. Install via your OS, e.g.
-   `sudo apt install ffmpeg` or `brew install ffmpeg`.
+2. **The TeamTalk 5 SDK — already bundled.** The official TeamTalk 5 SDK
+   v5.22a ships in [`sdk/`](sdk/): the platform-aware `TeamTalk5.py` wrapper,
+   the Linux `libTeamTalk5.so`, and the Windows (x64) `TeamTalk5.dll`. The bot
+   finds it automatically — no separate download or `sdk.path` needed. (To use
+   a different version, set `sdk.path` or the `TEAMTALK_SDK` env var.)
+   > The SDK is © BearWare.dk and runs in *trial mode* without a license key;
+   > its `sdk/License.txt` is kept intact. A license key is required for
+   > non-evaluation use and redistribution — see <https://bearware.dk>.
+3. **ffmpeg** — needed to decode media on **Linux/macOS** (`sudo apt install
+   ffmpeg` or `brew install ffmpeg`). On Windows it's built into the bundled
+   `TeamTalk5.dll`, so no separate install is required there.
 4. **A bot account on the server** with the *Transmit media files* user right.
+5. **macOS only:** the SDK's `libTeamTalk5.dylib` isn't bundled (download it
+   from BearWare and point `sdk.path` at it).
 
 Install the Python dependencies:
 
@@ -87,21 +90,18 @@ edit it.
 
 ### Windows
 
-The bot is cross-platform. On Windows you can skip the command line:
+The bot is cross-platform, and the Windows SDK DLL is bundled, so you can
+skip the command line:
 
-1. Install [Python 3.11+](https://www.python.org/downloads/) (tick *"Add
-   Python to PATH"*) and [ffmpeg](https://ffmpeg.org/download.html) (or
-   `winget install Gyan.FFmpeg`).
-2. Download the **Windows** TeamTalk SDK and unzip it. Its layout is usually
-   `Library\TeamTalkPy\TeamTalk5.py` next to `Library\TeamTalk_DLL\TeamTalk5.dll`
-   — point `sdk.path` at the `TeamTalkPy` folder; the loader finds the DLLs in
-   the sibling `TeamTalk_DLL` automatically.
-3. Double-click **`windows\setup.bat`**. It creates a virtual environment,
-   installs the dependencies, checks for ffmpeg, and runs the setup wizard.
-4. Start the bot any time by double-clicking **`windows\run.bat`**.
+1. Install **64-bit** [Python 3.11+](https://www.python.org/downloads/) (tick
+   *"Add Python to PATH"*). No SDK download and no ffmpeg install are needed —
+   both are covered by the bundled `sdk\TeamTalk5.dll`.
+2. Double-click **`windows\setup.bat`**. It creates a virtual environment,
+   installs the dependencies, and runs the setup wizard (which auto-detects
+   the bundled SDK).
+3. Start the bot any time by double-clicking **`windows\run.bat`**.
 
-Make sure you download the SDK build that matches your Python architecture
-(64-bit Python needs the 64-bit SDK).
+Use 64-bit Python — the bundled `TeamTalk5.dll` is x64.
 
 ---
 

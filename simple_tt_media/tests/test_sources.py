@@ -103,3 +103,18 @@ def test_windows_dll_dir_sibling(tmp_path):
 def test_windows_dll_dir_missing(tmp_path):
     from ttmedia.sdk import _windows_dll_dir
     assert _windows_dll_dir(tmp_path) is None
+
+
+def test_bundled_sdk_present():
+    """The TeamTalk SDK is shipped with the project for zero-config use."""
+    from ttmedia.sdk import bundled_sdk_dir
+    d = bundled_sdk_dir()
+    assert (d / "TeamTalk5.py").is_file(), "wrapper missing from bundled sdk/"
+    assert (d / "TeamTalk5.dll").is_file(), "Windows DLL missing from bundled sdk/"
+    assert (d / "libTeamTalk5.so").is_file(), "Linux .so missing from bundled sdk/"
+    assert (d / "License.txt").is_file(), "SDK License.txt must be kept"
+
+
+def test_find_sdk_dir_prefers_bundled():
+    from ttmedia.sdk import find_sdk_dir, bundled_sdk_dir
+    assert find_sdk_dir("") == bundled_sdk_dir()

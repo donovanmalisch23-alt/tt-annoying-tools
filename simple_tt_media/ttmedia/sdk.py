@@ -110,11 +110,22 @@ def _prepare_native(sdk_dir: Path) -> None:
     )
 
 
+def bundled_sdk_dir() -> Path:
+    """The SDK that ships inside this project (simple_tt_media/sdk)."""
+    # ttmedia/sdk.py -> parent is ttmedia/, its parent is the project root.
+    return Path(__file__).resolve().parent.parent / "sdk"
+
+
 def find_sdk_dir(configured: str = "") -> Optional[Path]:
-    """Return the directory containing ``TeamTalk5.py``, or ``None``."""
+    """Return the directory containing ``TeamTalk5.py``, or ``None``.
+
+    Order: an explicit configured path, then the SDK bundled with this
+    project, then a few conventional locations relative to the working dir.
+    """
     candidates = []
     if configured:
         candidates.append(Path(configured).expanduser())
+    candidates.append(bundled_sdk_dir())
     candidates.extend(Path(g) for g in _DEFAULT_GUESSES)
     for cand in candidates:
         try:

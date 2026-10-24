@@ -3,12 +3,12 @@ config.toml
 *.env
 .env
 
-# TeamTalk SDK (download separately; do not commit the native library)
-TeamTalk5.py
-libTeamTalk5.so
-libTeamTalk5.dylib
-TeamTalk5.dll
-/sdk/
+# The TeamTalk SDK is bundled in sdk/ and intentionally committed.
+# Ignore any SDK copies a user drops elsewhere in the tree.
+/TeamTalk5.py
+/libTeamTalk5.so
+/libTeamTalk5.dylib
+/TeamTalk5.dll
 
 # Python
 __pycache__/
