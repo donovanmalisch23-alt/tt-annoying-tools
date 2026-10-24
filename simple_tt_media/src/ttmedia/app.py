@@ -50,6 +50,7 @@ class TTMediaApp:
 
         self._client.on_ready = self._on_ready
         self._client.on_text_message = self._on_text_message
+        self._client.on_channel_changed = self._on_channel_changed
 
     def run(self) -> None:
         log.info("Simple TT Media starting; search service: %s; sources: %s",
@@ -69,6 +70,22 @@ class TTMediaApp:
 
     def _on_finished(self, track: Track, reason: str) -> None:
         self._player.on_track_finished(track, reason)
+
+    def _on_channel_changed(self, channel_id: int) -> None:
+        # The bot was moved to another channel. Re-init the voice stream for the
+        # new channel's codec so playback keeps working instead of breaking up.
+        if not self._engine.is_playing:
+            return
+        if not self._client.channel_has_audio_codec(channel_id):
+            log.warning("New channel %s has no audio codec; stopping playback.",
+                        channel_id)
+            self._player.stop()
+            self._client.send_channel(
+                "I was moved to a channel with no voice codec, so I can't play "
+                "audio here.")
+            return
+        log.info("Adjusting playback to the new channel's audio codec.")
+        self._engine.restart_for_channel_change()
 
     def _announce(self, text: str) -> None:
         if self._cfg.bot.announce_now_playing:

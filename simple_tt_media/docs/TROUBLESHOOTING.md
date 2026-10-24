@@ -55,6 +55,12 @@ error. For very long live streams this is normal; just replay.
 **“Can't seek in a live stream”**
 Internet radio and live streams have no fixed length, so seeking is disabled.
 
+**The bot was moved to another channel**
+This is handled automatically: when an admin moves the bot while it's playing,
+it re-initialises its audio for the new channel's codec and keeps playing. If
+the destination channel has no voice codec configured, the bot stops and says
+so in the channel.
+
 ## Spotify / Apple Music
 
 **“Spotify albums and playlists need a free Spotify developer app”**

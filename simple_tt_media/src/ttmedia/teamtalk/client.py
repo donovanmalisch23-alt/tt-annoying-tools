@@ -51,6 +51,7 @@ class TeamTalkClient:
         self._running = False
         self._stop = False
         self._my_user_id = 0
+        self._channel_id = 0
         self._logged_in = threading.Event()
         self._in_channel = threading.Event()
         self._send_lock = threading.Lock()
@@ -60,6 +61,8 @@ class TeamTalkClient:
         self.on_text_message: Callable[[TextMessageEvent], None] = lambda e: None
         self.on_disconnected: Callable[[], None] = lambda: None
         self.on_audio_input: Callable[[int, int, int], None] = lambda s, q, e: None
+        # Called with the new channel id when the bot is moved between channels.
+        self.on_channel_changed: Callable[[int], None] = lambda cid: None
 
     # ---- lifecycle ------------------------------------------------------
 
@@ -103,6 +106,7 @@ class TeamTalkClient:
         tt = self._tt
         self._logged_in.clear()
         self._in_channel.clear()
+        self._channel_id = 0
         log.info("Connecting to %s:%s ...", s.host, s.tcp_port)
         ok = self._inst.connect(tt.ttstr(s.host), s.tcp_port, s.udp_port,
                                 0, 0, s.encrypted)
@@ -137,6 +141,11 @@ class TeamTalkClient:
                 self._handle_cmd_error(msg)
             elif e == ev.CLIENTEVENT_CMD_USER_TEXTMSG:
                 self._dispatch_text(msg.textmessage)
+            elif e == ev.CLIENTEVENT_CMD_USER_JOINED:
+                # Fires for the bot itself when it joins or is moved; a change
+                # of channel means we must re-init the voice stream for the new
+                # channel's audio codec.
+                self._maybe_channel_change(msg.user)
             elif e == ev.CLIENTEVENT_CMD_SUCCESS:
                 # Joining the channel resolves asynchronously; confirm by id.
                 if not self._in_channel.is_set() and self._inst.getMyChannelID() > 0:
@@ -170,11 +179,35 @@ class TeamTalkClient:
         self._inst.doChangeStatus(STATUS_ONLINE, tt.ttstr(s.status_message))
 
     def _announce_ready(self) -> None:
-        log.info("Joined channel %s; ready.", self._inst.getMyChannelID())
+        self._channel_id = self._inst.getMyChannelID()
+        log.info("Joined channel %s; ready.", self._channel_id)
         try:
             self.on_ready()
         except Exception:  # noqa: BLE001
             log.exception("on_ready handler failed")
+
+    def _maybe_channel_change(self, user) -> None:
+        if user.nUserID != self._my_user_id:
+            return
+        new_cid = user.nChannelID
+        old_cid = self._channel_id
+        if new_cid == old_cid:
+            return
+        self._channel_id = new_cid
+        # Ignore the very first join (old_cid == 0); only react to real moves.
+        if old_cid and new_cid > 0:
+            log.info("Bot moved from channel %s to %s.", old_cid, new_cid)
+            try:
+                self.on_channel_changed(new_cid)
+            except Exception:  # noqa: BLE001
+                log.exception("on_channel_changed handler failed")
+
+    def channel_has_audio_codec(self, channel_id: int) -> bool:
+        try:
+            ch = self._inst.getChannel(channel_id)
+            return ch.audiocodec.nCodec != self._tt.Codec.NO_CODEC
+        except Exception:  # noqa: BLE001
+            return True  # assume playable rather than refuse on a lookup error
 
     def _handle_cmd_error(self, msg) -> None:
         try:
