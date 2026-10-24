@@ -147,15 +147,9 @@ def main() -> int:
 
     header("Review")
     print(dump_config(cfg))
-
-    path = DEFAULT_CONFIG_PATH
-    if not ask_bool(f"Save this configuration to {path}?", True):
-        path = ask("Enter a different filename (or leave blank to cancel)", "")
-        if not path:
-            print("Not saved. Run Setup again when you're ready.")
-            return 1
-    if Path(path).exists() and not ask_bool(f"{path} already exists. Overwrite it?", True):
-        print("Not saved. Run Setup again when you're ready.")
+    path = ask("Save to", DEFAULT_CONFIG_PATH)
+    if Path(path).exists() and not ask_bool(f"{path} exists. Overwrite?", False):
+        print("Not saved.")
         return 1
     try:
         save_config(cfg, path)
