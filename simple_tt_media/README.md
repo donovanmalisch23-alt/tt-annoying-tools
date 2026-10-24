@@ -1,272 +1,156 @@
 # Simple TT Media
 
-A simple yet robust media-player bot for [TeamTalk 5](https://bearware.dk)
-servers. Point it at a server, drop it in a channel, and let people queue
-music from YouTube, Spotify, or Apple Music with plain chat commands.
+An advanced, easy-to-run **media player bot for [TeamTalk 5](https://bearware.dk) on Windows**.
+Drop it on a server, and anyone in the channel can play music from **YouTube,
+SoundCloud, Spotify, Apple Music**, or any **direct/radio stream** — just by
+sending the bot a private message.
 
-> This project is self-contained and unrelated to anything else in the
-> surrounding repository.
+```text
+p daft punk get lucky
+q
+seek 1:30
+v 60
+```
 
-```
-!play daft punk around the world
-!queue
-!skip
-```
+> **Windows-only by design.** The TeamTalk SDK (including media decoding) and a
+> one-click setup are tuned for Windows. The whole project lives in this one
+> folder and is unrelated to anything else in the repository.
 
 ---
 
-## What it does
+## Highlights
 
-- Connects to any TeamTalk 5 server, logs in, joins a channel, and reconnects
-  automatically if the connection drops.
-- Plays audio into the channel by streaming media files/URLs through the
-  official TeamTalk SDK.
-- Resolves requests from several services behind one tidy `!play` command:
-  - **YouTube** — videos, playlists, and free-text search (via `yt-dlp`).
-  - **Spotify** — track / album / playlist links (metadata).
-  - **Apple Music** — song / album links (metadata, no account needed).
-  - **Local files & direct URLs** — anything ffmpeg can open, including
-    internet-radio streams.
-- A full queue with now-playing announcements: skip, pause/resume, seek,
-  volume, loop (track/queue), shuffle, and autoplay of related tracks.
-- Saved, named playlists that re-resolve fresh audio when loaded.
-- Optional operator permissions: anyone can queue, controls can be locked down.
-
-### An honest note on Spotify & Apple Music
-
-Spotify and Apple Music audio is DRM-protected and **cannot be restreamed**.
-When you paste one of their links, Simple TT Media reads the *track info*
-(title, artist, playlist contents) from the service and then plays the
-matching audio from **YouTube**. That means YouTube must be enabled for
-Spotify/Apple Music links to work, and the exact recording you hear may differ
-from the original. This is the standard, compliant approach music bots take.
+- **No virtual audio cable.** Audio is decoded with ffmpeg and injected
+  straight into TeamTalk's voice stream (`InsertAudioBlock`). Unlike mpv-based
+  bots, there's no VB-Cable to install and configure.
+- **Many sources, one command.** `p <words>` searches; `p <link>` /
+  `url <link>` play. YouTube, SoundCloud, Spotify and Apple Music links all
+  work (Spotify/Apple audio, which is DRM-protected, is matched and played from
+  YouTube), plus direct files and internet radio.
+- **A real player.** Queue, now-playing, skip/previous, pause/resume, seek,
+  live volume, repeat (track/queue), shuffle — all controllable by message.
+- **Friendly and chatty.** Every command replies with a clear, detailed
+  message, and an unknown command returns an explicit error.
+- **Robust.** Automatic reconnect, one retry on an expired stream URL, bounded
+  queues/history, next-track prefetch, and responsive stop/skip (~0.3 s).
+- **One-click setup.** `Setup.bat` builds an isolated environment and downloads
+  ffmpeg and the Deno runtime for you; the SDK is already bundled.
 
 ---
 
 ## Requirements
 
-1. **Python 3.11+**
-2. **The TeamTalk 5 SDK — already bundled.** The official TeamTalk 5 SDK
-   v5.22a ships in [`sdk/`](sdk/), using the SDK's own folder layout:
-   `sdk/TeamTalkPy/TeamTalk5.py` (the platform-aware wrapper) beside
-   `sdk/TeamTalk_DLL/` holding the Windows x64 `TeamTalk5.dll` and the Linux
-   `libTeamTalk5.so`. The bot finds it automatically — no separate download or
-   `sdk.path` needed. (To use a different version, set `sdk.path` or the
-   `TEAMTALK_SDK` env var to an unpacked SDK folder.)
-   > The SDK is © BearWare.dk and runs in *trial mode* without a license key;
-   > its `sdk/License.txt` is kept intact. A license key is required for
-   > non-evaluation use and redistribution — see <https://bearware.dk>.
-3. **Media decoding** — on **Windows** this is built into the bundled
-   `TeamTalk5.dll` (via Windows Media Foundation); nothing to install. On
-   **Linux/macOS** install **ffmpeg** (`sudo apt install ffmpeg` or
-   `brew install ffmpeg`).
-4. **A bot account on the server** with the *Transmit media files* user right.
-5. **macOS only:** the SDK's `libTeamTalk5.dylib` isn't bundled (download it
-   from BearWare and point `sdk.path` at it).
+1. **Windows 10/11, 64-bit.**
+2. **64-bit Python 3.11 or newer** — <https://www.python.org/downloads/>
+   (tick *“Add Python to PATH”* when installing).
+3. **A TeamTalk account for the bot** on your server, with the
+   *“transmit voice”* right. Nothing else is needed — ffmpeg, the Deno runtime
+   (for YouTube) and the TeamTalk SDK are all handled for you.
 
-Install the Python dependencies:
-
-```bash
-pip install -r requirements.txt
-```
+Internet access is required so the bot can reach the streaming services.
 
 ---
 
 ## Quick start
 
-```bash
-# 1. Install deps (see above) and have the TeamTalk SDK downloaded.
-# 2. Run the interactive setup wizard — it writes config.toml for you.
-python setup_bot.py
+1. Download/clone this folder onto the Windows machine.
+2. Double-click **`Setup.bat`**. It will:
+   - create a local Python environment under `.venv`,
+   - install the bot and its dependencies,
+   - download ffmpeg and Deno into `tools\`,
+   - run a short wizard that asks for your server details and writes
+     `config.toml`.
+3. Double-click **`Start.bat`** to run the bot.
+4. In TeamTalk, open a **private message** to the bot and send **`h`** for the
+   list of commands.
 
-# 3. Start the bot.
-python -m ttmedia --config config.toml
+Prefer the command line? After `Setup.bat` once:
+
+```bat
+.venv\Scripts\activate
+ttmedia -c config.toml
 ```
 
-The wizard asks for your server details, personalises the bot (nickname,
-status, operators), lets you pick which streaming services to enable, checks
-for ffmpeg and the optional libraries, and can test the connection before you
-commit.
-
-Prefer to configure by hand? Copy `config.example.toml` to `config.toml` and
-edit it.
-
-### Windows
-
-The bot is cross-platform, and the Windows SDK DLL is bundled, so you can
-skip the command line:
-
-1. Install **64-bit** [Python 3.11+](https://www.python.org/downloads/) (tick
-   *"Add Python to PATH"*). No SDK download and no ffmpeg install are needed —
-   both are covered by the bundled `sdk\TeamTalk5.dll`.
-2. Double-click **`windows\setup.bat`**. It creates a virtual environment,
-   installs the dependencies, and runs the setup wizard (which auto-detects
-   the bundled SDK).
-3. Start the bot any time by double-clicking **`windows\run.bat`**.
-
-Use 64-bit Python — the bundled `TeamTalk5.dll` is x64.
+See **[docs/SETUP.md](docs/SETUP.md)** for a step-by-step guide (including
+creating the bot's server account) and **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**
+if something doesn't work.
 
 ---
 
-## Chat commands
+## Commands
 
-All commands are typed in the bot's channel (or as a private message to it)
-and start with the prefix (default `!`).
+Full list with usage and examples: **[docs/COMMANDS.md](docs/COMMANDS.md)**.
+A quick taste:
 
-Anyone may search and queue; the playback **controls** are operator-gated
-(when operators are configured — otherwise everyone can use everything).
-
-**Open to everyone**
-
-| Command | Aliases | What it does |
-|---|---|---|
-| `!play <link or search>` | `!p` | Queue a track/playlist, or start it if idle |
-| `!queue` | `!q` | Show what's playing and what's next |
-| `!nowplaying` | `!np` | Show the current track |
-| `!playlists` | | List saved playlists |
-| `!sources` | | List enabled services and current modes |
-| `!help` | `!h` | Show the command list |
-
-**Controls (operator-gated)**
-
-| Command | What it does |
+| Command | Does |
 |---|---|
-| `!skip` (`!s`, `!next`) | Skip the current track |
-| `!pause` / `!resume` | Pause or resume playback |
-| `!seek <mm:ss>` | Jump to a position (e.g. `!seek 1:30`) |
-| `!volume <0-300>` | Set volume percent (100 = normal) |
-| `!loop <off\|track\|queue>` | Repeat the track, the whole queue, or nothing |
-| `!shuffle [on\|off]` | Toggle shuffle mode, or shuffle the queue now |
-| `!autoplay <on\|off>` | Keep playing related tracks when the queue empties |
-| `!stop` | Stop playback and clear the queue |
-| `!clear` | Clear the queue but keep playing |
-| `!save <name>` | Save the current track + queue as a playlist |
-| `!load <name>` | Queue a saved playlist (re-resolved fresh) |
-| `!delete <name>` | Delete a saved playlist |
+| `p <words or link>` | Search & play, or play a link (no args = pause/resume) |
+| `s <words>` then `p <n>` | Search, then pick a result by number |
+| `url <link>` | Play a direct media file or internet-radio stream |
+| `q` / `np` | Show the queue / the current track and position |
+| `next` `prev` `pause` `resume` `stop` | Transport controls |
+| `v <0-200>` `seek <m:ss>` `ff`/`rw` | Volume and seeking |
+| `repeat <off/track/queue>` `shuffle` | Playback modes |
+| `sv <service>` | Choose which service free-text searches (YouTube default) |
+| `h` / `h <command>` | Help, or details for one command |
 
-Saved playlists are stored as re-resolvable queries (URLs or "artist title"),
-not raw stream URLs — those expire — so loading always fetches fresh audio.
+Administrators (set during setup) also get `say` and `quit`.
 
 ---
 
-## Configuration
+## How it works
 
-Config lives in `config.toml` (TOML). Secrets can be kept out of the file and
-supplied via environment variables, which always win:
+```text
+            private message                resolve                 decode + inject
+  user  ───────────────────▶  commands ─────────────▶ sources ─────────────────────▶ TeamTalk
+                                  │                   (yt-dlp /        (ffmpeg → PCM →   voice
+                                  ▼                    iTunes /         InsertAudioBlock) stream
+                               player  ◀── queue ──▶   Spotify)
+                                  │
+                                  ▼
+                              audio engine (paces audio in real time)
+```
 
-| Env var | Overrides |
+| Area | File |
 |---|---|
-| `TT_PASSWORD` | `server.password` |
-| `TT_CHANNEL_PASSWORD` | `server.channel_password` |
-| `SPOTIFY_CLIENT_ID` | `sources.spotify_client_id` |
-| `SPOTIFY_CLIENT_SECRET` | `sources.spotify_client_secret` |
-| `TEAMTALK_SDK` | `sdk.path` |
+| Config (TOML + env) | `src/ttmedia/config.py` |
+| SDK loader (Windows) | `src/ttmedia/sdk.py` |
+| TeamTalk client (connect/login/join/reconnect, messaging) | `src/ttmedia/teamtalk/client.py` |
+| Audio engine (ffmpeg → `InsertAudioBlock`, volume/pause/seek) | `src/ttmedia/teamtalk/audio.py` |
+| Queue & policy (repeat/shuffle/history/prefetch) | `src/ttmedia/player.py` |
+| Sources (YouTube, SoundCloud, Spotify, Apple, direct) | `src/ttmedia/sources/` |
+| Commands (dispatch + handlers) | `src/ttmedia/commands/` |
+| Setup wizard / tool bootstrap | `src/ttmedia/setup_wizard.py`, `bootstrap.py` |
 
-See `config.example.toml` for every option with comments.
+### A note on Spotify & Apple Music
 
----
-
-## Run as a service (Linux)
-
-To keep the bot running across reboots, use the included
-`deploy/simple-tt-media.service` as a template. Edit the paths, user, and
-secret env vars, then:
-
-```bash
-sudo cp deploy/simple-tt-media.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now simple-tt-media
-journalctl -u simple-tt-media -f        # follow the logs
-```
-
-The unit sets `Restart=on-failure`, so the bot comes back after crashes; it
-also reconnects on its own if the server connection drops.
+Their audio is DRM-protected and cannot be restreamed, so the bot reads the
+*track information* from them and plays the matching audio from YouTube. Single
+Spotify track links work with no setup; Spotify **albums/playlists** need a free
+developer app (client id/secret, entered in setup). Apple Music **songs and
+albums** work with no account; Apple **playlists** aren't available (Apple only
+exposes them to its paid developer API).
 
 ---
 
-## How it's put together
+## Developing
 
-The code is split into small, single-responsibility pieces so it's easy to
-read and extend:
-
-```
-ttmedia/
-  config.py      Load/save TOML config (+ env overrides) and validate it.
-  sdk.py         Locate and load the official TeamTalk SDK robustly.
-  bot.py         Connect/login/join, event loop, reconnect, send messages,
-                 and start/stop media streams (the transport layer).
-  player.py      The queue, playback modes, and live controls (no SDK, testable).
-  commands.py    Parse "!" commands and dispatch them.
-  storage.py     Saved playlists (JSON; stores re-resolvable queries).
-  models.py      Track / ResolveResult data types.
-  sources/       One plugin per service; a registry dispatches queries.
-    base.py        The Source contract.
-    youtube.py     yt-dlp audio provider + search backend.
-    spotify.py     Spotify metadata -> YouTube.
-    applemusic.py  Apple Music metadata (iTunes API) -> YouTube.
-    local.py       Local files and direct URLs.
-setup_bot.py     Interactive first-run wizard.
-tests/           Unit tests (run with `pytest`; no SDK or network needed).
-```
-
-Key design choices:
-
-- **The SDK is loaded lazily and robustly.** `sdk.py` finds `TeamTalk5.py`,
-  pre-loads the native library by absolute path, and imports the wrapper — so
-  you don't have to fiddle with `LD_LIBRARY_PATH`.
-- **The player has no dependency on the SDK or the network**, which keeps the
-  queue/skip/stop logic fully unit-tested. The bot injects itself as the
-  "streamer".
-- **Resolving a query never blocks the event loop** — it runs on a worker
-  thread, so the bot stays responsive.
-- **One source crashing never takes the bot down** — sources fail soft with a
-  readable message.
-
-### Adding a new streaming service
-
-1. Create `ttmedia/sources/myservice.py` with a `Source` subclass implementing
-   `matches()` and `resolve()`.
-2. If the service has no restreamable audio, return tracks with a
-   `search_query` (like Spotify/Apple Music) and the registry will play the
-   match from YouTube.
-3. Register it in `ttmedia/sources/__init__.py` (and add a config toggle in
-   `config.py` if it needs one).
-
-That's the whole contract — nothing else changes.
-
----
-
-## Testing
-
-```bash
-pip install pytest
+```bat
+.venv\Scripts\activate
+pip install -e ".[dev,fast]"
 pytest
 ```
 
-The suite covers config round-tripping, the queue state machine, the source
-registry (including metadata back-fill), and command dispatch/permissions —
-all without a live server or the SDK.
+Adding a streaming service is a small, self-contained job: subclass `Source`
+in `src/ttmedia/sources/`, implement `matches` / `from_url` (and `search`), and
+register it in `sources/__init__.py`.
 
 ---
 
-## Troubleshooting
+## Licensing
 
-- **"Could not find the TeamTalk 5 SDK"** — set `sdk.path` (or `TEAMTALK_SDK`)
-  to the folder with `TeamTalk5.py` and the native library.
-- **"could not load it … platform mismatch"** — the native library doesn't
-  match your Python (e.g. 32- vs 64-bit, or wrong OS build). Re-download the
-  matching SDK.
-- **Login rejected** — check the username/password and that the account
-  exists on the server.
-- **Audio doesn't play** — confirm ffmpeg is installed and the bot account has
-  the *Transmit media files* right in its channel.
-- **Spotify/Apple Music links do nothing** — make sure YouTube is enabled
-  (they rely on it for playback) and, for Spotify, that your client id/secret
-  are set.
-
----
-
-## License
-
-MIT for this project's own code. The TeamTalk SDK and ffmpeg carry their own
-licenses — review them before any non-evaluation use.
+This project's own code is MIT (see `LICENSE`). The bundled **TeamTalk 5 SDK**
+is © BearWare.dk and is governed by `sdk/License.txt` (it runs in trial mode
+without a license key). **ffmpeg** and **Deno**, downloaded by setup, carry
+their own licenses. You are responsible for complying with the terms of the
+streaming services you use.
