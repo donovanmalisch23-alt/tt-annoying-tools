@@ -81,3 +81,25 @@ def test_registry_from_config_orders_youtube_last():
     assert names[-1] == "youtube"
     assert "local" == names[0]
     assert "applemusic" in names
+
+
+def test_windows_dll_dir_flat(tmp_path):
+    from ttmedia.sdk import _windows_dll_dir
+    (tmp_path / "TeamTalk5.py").write_text("")
+    (tmp_path / "TeamTalk5.dll").write_bytes(b"\x00")
+    assert _windows_dll_dir(tmp_path) == tmp_path
+
+
+def test_windows_dll_dir_sibling(tmp_path):
+    from ttmedia.sdk import _windows_dll_dir
+    py = tmp_path / "TeamTalkPy"
+    dll = tmp_path / "TeamTalk_DLL"
+    py.mkdir(); dll.mkdir()
+    (py / "TeamTalk5.py").write_text("")
+    (dll / "TeamTalk5.dll").write_bytes(b"\x00")
+    assert _windows_dll_dir(py) == dll
+
+
+def test_windows_dll_dir_missing(tmp_path):
+    from ttmedia.sdk import _windows_dll_dir
+    assert _windows_dll_dir(tmp_path) is None

@@ -85,6 +85,24 @@ commit.
 Prefer to configure by hand? Copy `config.example.toml` to `config.toml` and
 edit it.
 
+### Windows
+
+The bot is cross-platform. On Windows you can skip the command line:
+
+1. Install [Python 3.11+](https://www.python.org/downloads/) (tick *"Add
+   Python to PATH"*) and [ffmpeg](https://ffmpeg.org/download.html) (or
+   `winget install Gyan.FFmpeg`).
+2. Download the **Windows** TeamTalk SDK and unzip it. Its layout is usually
+   `Library\TeamTalkPy\TeamTalk5.py` next to `Library\TeamTalk_DLL\TeamTalk5.dll`
+   — point `sdk.path` at the `TeamTalkPy` folder; the loader finds the DLLs in
+   the sibling `TeamTalk_DLL` automatically.
+3. Double-click **`windows\setup.bat`**. It creates a virtual environment,
+   installs the dependencies, checks for ffmpeg, and runs the setup wizard.
+4. Start the bot any time by double-clicking **`windows\run.bat`**.
+
+Make sure you download the SDK build that matches your Python architecture
+(64-bit Python needs the 64-bit SDK).
+
 ---
 
 ## Chat commands
