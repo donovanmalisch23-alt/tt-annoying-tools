@@ -1,0 +1,47 @@
+# Simple TT Media - example configuration.
+# Copy to config.toml and edit, or just run `python setup_bot.py`.
+#
+# Secrets can be left blank here and supplied via environment variables:
+#   TT_PASSWORD, TT_CHANNEL_PASSWORD, SPOTIFY_CLIENT_ID,
+#   SPOTIFY_CLIENT_SECRET, TEAMTALK_SDK
+
+log_level = "INFO"
+
+[server]
+host = "teamtalk.example.com"
+tcp_port = 10333
+udp_port = 10333
+username = "mediabot"
+password = ""              # prefer TT_PASSWORD env var
+channel = "/Music"         # "/" for the root channel
+channel_password = ""
+encrypted = false
+
+[bot]
+nickname = "MediaBot"
+status_message = "Ready to play music"
+gender = "neutral"
+command_prefix = "!"
+operators = []             # empty = everyone may control the bot
+reconnect_seconds = 5
+
+[playback]
+announce_now_playing = true
+max_queue = 200
+default_volume = 100          # percent (100 = normal)
+loop = "off"                  # off | track | queue
+shuffle = false
+autoplay = false              # keep playing related tracks when the queue empties
+playlists_file = "playlists.json"
+
+[sources]
+youtube_enabled = true
+spotify_enabled = false
+spotify_client_id = ""
+spotify_client_secret = ""
+applemusic_enabled = false
+
+[sdk]
+# Folder containing TeamTalk5.py and the native library.
+# Blank = already importable (on PYTHONPATH) or auto-detected in ./sdk.
+path = ""

@@ -1,0 +1,34 @@
+# Local configuration & secrets
+config.toml
+*.env
+.env
+
+# TeamTalk SDK (download separately; do not commit the native library)
+TeamTalk5.py
+libTeamTalk5.so
+libTeamTalk5.dylib
+TeamTalk5.dll
+/sdk/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Caches / editors
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+.idea/
+.vscode/
+
+# Downloaded media scratch
+*.part
+*.tmp
+downloads/
+.pytest_cache/
