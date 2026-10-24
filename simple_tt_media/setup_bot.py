@@ -159,7 +159,10 @@ def configure_sources() -> SourcesConfig:
 
 def check_environment(sources: SourcesConfig) -> None:
     header("Environment checks")
-    if shutil.which("ffmpeg"):
+    if sys.platform == "win32":
+        print("[ok] Media decoding is built into the bundled TeamTalk5.dll "
+              "(no ffmpeg needed).")
+    elif shutil.which("ffmpeg"):
         print("[ok] ffmpeg found.")
     else:
         print("[!!] ffmpeg NOT found. The TeamTalk SDK needs ffmpeg/avconv to "

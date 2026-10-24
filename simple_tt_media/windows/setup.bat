@@ -35,15 +35,8 @@ pip install -r requirements.txt
 if errorlevel 1 ( echo Dependency install failed. & pause & exit /b 1 )
 
 echo.
-echo Checking for ffmpeg...
-where ffmpeg >nul 2>nul
-if errorlevel 1 (
-    echo [!!] ffmpeg not found on PATH. The TeamTalk SDK needs it to decode media.
-    echo      Install it from https://ffmpeg.org/download.html and add it to PATH,
-    echo      or run:  winget install Gyan.FFmpeg
-) else (
-    echo [ok] ffmpeg found.
-)
+echo The TeamTalk SDK (including media decoding) is bundled in sdk\ -
+echo no separate SDK or ffmpeg install is needed on Windows.
 
 echo.
 echo Launching the setup wizard...
